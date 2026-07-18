@@ -1,0 +1,2 @@
+delineator>=2.2.4
+flask>=3.1
