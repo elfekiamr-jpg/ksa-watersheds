@@ -24,6 +24,7 @@ import traceback
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+import data_dir  # noqa: F401  (sets DELINEATOR_DATA_DIR before delineator loads)
 from delineator.core import delineate
 from delineator.settings import DelineatorConfig
 
