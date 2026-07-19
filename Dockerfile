@@ -18,7 +18,11 @@ RUN mkdir -p /data && \
     python -c "from delineator.core import downloader; downloader(29)"
 
 COPY app.py .
+COPY data_dir.py .
+COPY vercel_skimage_fix.py .
+COPY vercel_numba_fix.py .
 COPY static/ static/
+
 
 EXPOSE 8000
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "4", "--timeout", "120", "app:app"]
