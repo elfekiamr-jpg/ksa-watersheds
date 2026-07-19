@@ -25,6 +25,7 @@ import traceback
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 import data_dir  # noqa: F401  (sets DELINEATOR_DATA_DIR before delineator loads)
+import vercel_numba_fix  # noqa: F401  (must come before numba is imported — see file)
 import vercel_skimage_fix  # noqa: F401  (harmless no-op outside Vercel — see file for why)
 from delineator.core import delineate
 from delineator.settings import DelineatorConfig
