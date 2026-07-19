@@ -1,2 +1,10 @@
 delineator>=2.2.4
 flask>=3.1
+
+# pysheds (a delineator dependency) needs numba, but leaving its version
+# unconstrained let Vercel's installer resolve an ancient numba/llvmlite
+# pair (2021-era) with no prebuilt wheel for Python 3.12, so it tried to
+# compile llvmlite from source and failed. Pinning modern versions here
+# forces it to use ones that have ready-made installs instead.
+numba>=0.60
+llvmlite>=0.43
