@@ -1,40 +1,56 @@
-from flask import Flask, request, jsonify
+from http.server import BaseHTTPRequestHandler
+import json
+import urllib.parse
 import requests
 
-app = Flask(__name__)
+class handler(BaseHTTPRequestHandler):
 
-# Base route to confirm app is running
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        "status": "online",
-        "message": "KSA Watersheds API Proxy is active.",
-        "usage": "/api/watershed?lat=21.5433&lng=39.1728"
-    })
+    def do_GET(self):
+        # Parse query parameters
+        parsed_path = urllib.parse.urlparse(self.path)
+        path = parsed_path.path
+        query_params = urllib.parse.parse_qs(parsed_path.query)
 
-@app.route('/api/status', methods=['GET'])
-def status():
-    return jsonify({"status": "proxy running"})
+        # Handle status endpoint
+        if path == '/api/status':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"status": "proxy running"}
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            return
 
-@app.route('/api/watershed', methods=['GET'])
-def get_watershed():
-    lat = request.args.get('lat')
-    lng = request.args.get('lng')
-    precision = request.args.get('precision', 'high')
+        # Handle watershed proxy endpoint
+        if path == '/api/watershed':
+            lat = query_params.get('lat', [None])[0]
+            lng = query_params.get('lng', [None])[0]
+            precision = query_params.get('precision', ['high'])[0]
 
-    if not lat or not lng:
-        return jsonify({"error": "Latitude and longitude are required parameters."}), 400
+            if not lat or not lng:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Missing lat or lng"}).encode('utf-8'))
+                return
 
-    # Correct MGhydro API endpoint
-    target_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision={precision}"
-    
-    headers = {'User-Agent': 'Mozilla/5.0'}
+            target_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision={precision}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
 
-    try:
-        res = requests.get(target_url, headers=headers, timeout=12)
-        if res.status_code == 200:
-            return (res.text, 200, {'Content-Type': 'application/json'})
-        else:
-            return jsonify({"error": f"Upstream API returned status {res.status_code}", "details": res.text}), res.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            try:
+                res = requests.get(target_url, headers=headers, timeout=10)
+                self.send_response(res.status_code)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(res.content)
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+            return
+
+        # Default fallback route
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({"message": "KSA Watersheds API active"}).encode('utf-8'))
