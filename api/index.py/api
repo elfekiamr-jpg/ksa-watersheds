@@ -3,6 +3,19 @@ import requests
 
 app = Flask(__name__)
 
+# Base route to confirm app is running
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "KSA Watersheds API Proxy is active.",
+        "usage": "/api/watershed?lat=21.5433&lng=39.1728"
+    })
+
+@app.route('/api/status', methods=['GET'])
+def status():
+    return jsonify({"status": "proxy running"})
+
 @app.route('/api/watershed', methods=['GET'])
 def get_watershed():
     lat = request.args.get('lat')
@@ -10,16 +23,18 @@ def get_watershed():
     precision = request.args.get('precision', 'high')
 
     if not lat or not lng:
-        return jsonify({"error": "Latitude and longitude required"}), 400
+        return jsonify({"error": "Latitude and longitude are required parameters."}), 400
 
+    # Correct MGhydro API endpoint
     target_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision={precision}"
     
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
     try:
-        res = requests.get(target_url, timeout=9)
-        return (res.text, res.status_code, {'Content-Type': 'application/json'})
+        res = requests.get(target_url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            return (res.text, 200, {'Content-Type': 'application/json'})
+        else:
+            return jsonify({"error": f"Upstream API returned status {res.status_code}", "details": res.text}), res.status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/status', methods=['GET'])
-def status():
-    return jsonify({"status": "proxy running"})
