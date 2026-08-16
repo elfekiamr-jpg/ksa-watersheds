@@ -12,27 +12,14 @@ def get_watershed():
     if not lat or not lng:
         return jsonify({"error": "Latitude and longitude required"}), 400
 
-    mghydro_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision={precision}"
+    target_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision={precision}"
     
     try:
-        response = requests.get(mghydro_url)
-        return jsonify(response.json())
+        res = requests.get(target_url, timeout=9)
+        return (res.text, res.status_code, {'Content-Type': 'application/json'})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/rivers', methods=['GET'])
-def get_rivers():
-    lat = request.args.get('lat')
-    lng = request.args.get('lng')
-    precision = request.args.get('precision', 'high')
-
-    if not lat or not lng:
-        return jsonify({"error": "Latitude and longitude required"}), 400
-
-    mghydro_url = f"https://mghydro.com/app/upstream_rivers_api?lat={lat}&lng={lng}&precision={precision}"
-    
-    try:
-        response = requests.get(mghydro_url)
-        return jsonify(response.json())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route('/api/status', methods=['GET'])
+def status():
+    return jsonify({"status": "proxy running"})
