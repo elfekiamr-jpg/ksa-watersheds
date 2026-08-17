@@ -1,9 +1,5 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "python3 predownload.py",
-  "functions": {
-    "app.py": {
-      "excludeFiles": "{README.md,DEPLOY.md,VERCEL_DEPLOY.md,Dockerfile,docker-compose.yml,Caddyfile,real_sample_output.png,.git/**}"
-    }
-  }
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.py" }
+  ]
 }
