@@ -43,16 +43,23 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _route(self):
+        """The real requested path arrives as ?path=... (see vercel.json's
+        rewrite destination), since Vercel replaces self.path with the
+        rewrite's destination path itself, not the original request path."""
+        query = parse_qs(urlparse(self.path).query)
+        return (query.get("path", [""])[0] or "").strip("/")
+
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/api/status" or path.endswith("/status"):
+        route = self._route()
+        if route == "status":
             self._send_json(200, {"status": "proxy running", "received_path": self.path})
             return
         self._send_json(404, {"error": "Not found", "received_path": self.path})
 
     def do_POST(self):
-        path = urlparse(self.path).path
-        if not (path == "/api/delineate" or path.endswith("/delineate")):
+        route = self._route()
+        if route != "delineate":
             self._send_json(404, {"error": "Not found", "received_path": self.path})
             return
 
