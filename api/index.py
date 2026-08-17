@@ -45,15 +45,15 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path == "/api/status":
-            self._send_json(200, {"status": "proxy running"})
+        if path == "/api/status" or path.endswith("/status"):
+            self._send_json(200, {"status": "proxy running", "received_path": self.path})
             return
-        self._send_json(404, {"error": "Not found"})
+        self._send_json(404, {"error": "Not found", "received_path": self.path})
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path != "/api/delineate":
-            self._send_json(404, {"error": "Not found"})
+        if not (path == "/api/delineate" or path.endswith("/delineate")):
+            self._send_json(404, {"error": "Not found", "received_path": self.path})
             return
 
         length = int(self.headers.get("Content-Length", 0))
