@@ -18,6 +18,7 @@ which has no dataset-size ceiling problem.
 """
 
 import json
+import math
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -32,6 +33,83 @@ UPSTREAM_URL = "https://mghydro.com/app/getwshed"
 def _in_ksa_bbox(lat, lng):
     lon_min, lat_min, lon_max, lat_max = KSA_BBOX
     return lon_min <= lng <= lon_max and lat_min <= lat <= lat_max
+
+
+def _ring_area_km2(ring):
+    """Spherical polygon area (standard equirectangular approximation) for
+    one [lon, lat] ring, in km^2. Accurate enough for regional-sized
+    watersheds; doesn't need geopandas/shapely (too heavy for Vercel)."""
+    if len(ring) < 3:
+        return 0.0
+    r = 6371000.0  # Earth radius, meters
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        lon1, lat1 = ring[i][0], ring[i][1]
+        lon2, lat2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += math.radians(lon2 - lon1) * (
+            2 + math.sin(math.radians(lat1)) + math.sin(math.radians(lat2))
+        )
+    return abs(total * r * r / 2.0) / 1e6
+
+
+def _geometry_area_km2(geometry):
+    """Area for a Polygon or MultiPolygon geometry dict. Exterior ring
+    only (index 0) minus holes (remaining rings), per ring."""
+    if not geometry:
+        return 0.0
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon":
+        polygons = [coords]
+    elif gtype == "MultiPolygon":
+        polygons = coords
+    else:
+        return 0.0
+
+    area = 0.0
+    for rings in polygons:
+        if not rings:
+            continue
+        area += _ring_area_km2(rings[0])  # exterior
+        for hole in rings[1:]:
+            area -= _ring_area_km2(hole)
+    return area
+
+
+def _snapped_outlet_latlng(outlet_fc, fallback_lat, fallback_lng):
+    """Pull the snapped-to-river outlet coordinates out of mghydro's
+    outlet FeatureCollection, falling back to the originally-clicked
+    point if no 'snapped' feature is present."""
+    features = (outlet_fc or {}).get("features") or []
+    for f in features:
+        props = f.get("properties") or {}
+        if props.get("type") == "snapped":
+            coords = (f.get("geometry") or {}).get("coordinates")
+            if coords and len(coords) >= 2:
+                return coords[1], coords[0]  # geometry is [lon, lat]
+    return fallback_lat, fallback_lng
+
+
+def _wrap_watershed(watershed_geom, outlet_fc, req_lat, req_lng):
+    """Wrap mghydro's bare watershed Polygon/MultiPolygon into the
+    FeatureCollection-with-properties shape the frontend expects
+    (matching what the real `delineator`-backed app.py produces)."""
+    if not watershed_geom:
+        return None
+    outlet_lat, outlet_lng = _snapped_outlet_latlng(outlet_fc, req_lat, req_lng)
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": {
+                "area_km2": round(_geometry_area_km2(watershed_geom), 2),
+                "outlet_lat": outlet_lat,
+                "outlet_lng": outlet_lng,
+            },
+            "geometry": watershed_geom,
+        }],
+    }
 
 
 class handler(BaseHTTPRequestHandler):
@@ -127,8 +205,9 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(502, {"error": "Upstream service returned an invalid response."})
             return
 
+        outlet_fc = data.get("outlet")
         self._send_json(200, {
-            "watershed": data.get("watershed"),
+            "watershed": _wrap_watershed(data.get("watershed"), outlet_fc, lat, lng),
             "rivers": data.get("rivers"),
-            "outlets": data.get("outlet"),
+            "outlets": outlet_fc,
         })
