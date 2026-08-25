@@ -1,606 +1,325 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Manabi — Saudi Arabia Watersheds</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg: #f4efe4;
-    --panel: #ffffff;
-    --panel-2: #efe8d8;
-    --line: #ddd2b8;
-    --sand: #b08d53;
-    --sand-dim: #8a7350;
-    --text: #2a231c;
-    --muted: #6b5f4d;
-    --water: #1f7a72;
-    --water-bright: #12938a;
-    --danger: #b23b21;
-  }
-  *{ box-sizing:border-box; }
-  html,body{ height:100%; margin:0; }
-  body{
-    font-family:'IBM Plex Sans', sans-serif;
-    background:var(--bg);
-    color:var(--text);
-    overflow:hidden;
-  }
-  #map{
-    position:absolute; inset:0;
-    background:var(--bg);
-  }
-  /* Leaflet light base tweaks */
-  .leaflet-tile-pane{ filter: saturate(0.85) brightness(1.02); }
-  .leaflet-control-zoom{ border:none !important; }
-  .leaflet-control-zoom a{
-    background:var(--panel) !important;
-    color:var(--sand) !important;
-    border:1px solid var(--line) !important;
-  }
-  .leaflet-control-attribution{
-    background:rgba(20,17,13,0.75) !important;
-    color:var(--muted) !important;
-  }
-  .leaflet-control-attribution a{ color:var(--sand-dim) !important; }
+"""
+KSA Watersheds — Vercel proxy backend (temporary/fragile path)
 
-  /* ---------- Header ---------- */
-  .brand{
-    position:absolute; top:20px; left:20px; z-index:1000;
-    display:flex; flex-direction:column; gap:2px;
-    pointer-events:none;
-  }
-  .brand .eyebrow{
-    font-family:'IBM Plex Mono', monospace;
-    font-size:11px; letter-spacing:0.18em; text-transform:uppercase;
-    color:var(--water-bright);
-  }
-  .brand h1{
-    font-family:'Space Grotesk', sans-serif;
-    font-weight:700; font-size:26px; margin:0;
-    color:var(--text); letter-spacing:0.01em;
-  }
-  .brand h1 span{ color:var(--sand); }
-  .brand p{
-    margin:2px 0 0; font-size:12.5px; color:var(--muted); max-width:280px;
-  }
+This is a lightweight stand-in for the real backend (app.py, which runs
+the `delineator` package locally against ~2.7 GB of baked-in MERIT-Hydro
+data). That real backend can't run on Vercel's serverless functions —
+the dataset is far bigger than the memory/bundle limits allow.
 
-  /* ---------- Mode toggle ---------- */
-  .mode-toggle{
-    position:absolute; top:22px; right:20px; z-index:1000;
-    display:flex; background:var(--panel);
-    border:1px solid var(--line); border-radius:999px;
-    padding:4px; gap:4px;
-  }
-  .mode-toggle button{
-    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
-    border:none; background:transparent; color:var(--muted);
-    padding:8px 16px; border-radius:999px; cursor:pointer;
-    transition:background .15s ease, color .15s ease;
-  }
-  .mode-toggle button.active{
-    background:var(--water); color:#0d1a18;
-  }
+Instead, this proxies each request to the same global watershed engine
+that mghydro.com/watersheds itself calls in the browser (found by
+inspecting its Network tab): GET https://mghydro.com/app/getwshed
 
-  /* ---------- Coordinate input ---------- */
-  .coord-panel{
-    position:absolute; top:20px; left:50%; transform:translateX(-50%);
-    z-index:1000; display:flex; flex-direction:column; align-items:center; gap:6px;
-  }
-  .coord-toggle{
-    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
-    background:var(--panel); border:1px solid var(--line); color:var(--muted);
-    padding:9px 16px; border-radius:999px; cursor:pointer;
-    transition:background .15s ease, color .15s ease;
-  }
-  .coord-toggle:hover{ color:var(--text); }
-  .coord-form{
-    display:flex; gap:6px; align-items:center;
-    background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    padding:8px; box-shadow:0 4px 16px rgba(0,0,0,0.08);
-  }
-  .coord-form input{
-    width:110px; font-family:'IBM Plex Mono', monospace; font-size:13px;
-    background:var(--panel-2); border:1px solid var(--line); border-radius:6px;
-    padding:7px 9px; color:var(--text);
-  }
-  .coord-form input::placeholder{ color:var(--muted); }
-  .coord-form button{
-    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
-    background:var(--water); color:#0d1a18; border:none;
-    padding:8px 14px; border-radius:6px; cursor:pointer;
-  }
+This is meant as a short-term stopgap to get a working public link
+quickly. It depends on mghydro.com's endpoint staying available and
+willing to serve non-browser traffic — there's no guarantee of that
+long-term. The real fix is deploying app.py to a VPS (see DEPLOY.md),
+which has no dataset-size ceiling problem.
 
-  /* ---------- Basemap toggle ---------- */
-  .basemap-toggle{
-    position:absolute; bottom:24px; left:20px; z-index:1000;
-    display:flex; background:var(--panel);
-    border:1px solid var(--line); border-radius:999px;
-    padding:4px; gap:4px;
-  }
-  .basemap-toggle button{
-    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
-    border:none; background:transparent; color:var(--muted);
-    padding:8px 14px; border-radius:999px; cursor:pointer;
-    transition:background .15s ease, color .15s ease;
-  }
-  .basemap-toggle button.active{ background:var(--water); color:#0d1a18; }
-  body.basemap-alt .leaflet-tile-pane{ filter:none; }
+Morphological parameters are computed here directly, in plain Python
+(haversine-based spherical approximations — no geopandas/shapely/pyproj),
+so the function stays small and fast enough for Vercel. Verified against
+the same hand-calculable test case used for the geopandas version in
+morphology.py — see chat notes. Slightly less precise than a proper local
+UTM projection, but well within the accuracy this app needs at basin
+scale.
+"""
+import json
+import math
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-  /* ---------- Hint pill ---------- */
-  .hint{
-    position:absolute; bottom:24px; left:50%; transform:translateX(-50%);
-    z-index:1000; background:var(--panel); border:1px solid var(--line);
-    color:var(--muted); font-size:12.5px; padding:9px 16px; border-radius:999px;
-    display:flex; align-items:center; gap:8px;
-    transition:opacity .25s ease;
-  }
-  .hint .dot{ width:6px; height:6px; border-radius:50%; background:var(--water-bright); }
+import requests
 
-  /* ---------- Result drawer ---------- */
-  .drawer{
-    position:absolute; top:0; right:0; height:100%; width:340px;
-    background:var(--panel); border-left:1px solid var(--line);
-    z-index:1001; transform:translateX(100%);
-    transition:transform .35s cubic-bezier(.2,.8,.2,1);
-    display:flex; flex-direction:column;
-  }
-  .drawer.open{ transform:translateX(0); }
-  .drawer-head{
-    padding:22px 22px 14px; border-bottom:1px solid var(--line);
-    display:flex; justify-content:space-between; align-items:flex-start;
-  }
-  .drawer-head .eyebrow{
-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.14em;
-    text-transform:uppercase; color:var(--water-bright); margin-bottom:6px; display:block;
-  }
-  .drawer-head h2{ font-family:'Space Grotesk', sans-serif; font-size:20px; margin:0; }
-  .drawer-close{
-    background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer;
-    line-height:1; padding:2px 6px;
-  }
-  .drawer-close:hover{ color:var(--text); }
-  .drawer-body{ padding:20px 22px; overflow-y:auto; flex:1; }
-  .stat{
-    margin-bottom:18px;
-  }
-  .stat .label{
-    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.1em;
-    text-transform:uppercase; color:var(--muted); margin-bottom:4px;
-  }
-  .stat .value{
-    font-family:'Space Grotesk', sans-serif; font-size:30px; font-weight:700; color:var(--text);
-  }
-  .stat .value small{ font-size:15px; font-weight:500; color:var(--sand); margin-left:4px; }
-  .coord-row{ display:flex; gap:14px; }
-  .coord-row .stat{ flex:1; }
-  .coord-row .value{ font-size:16px; font-family:'IBM Plex Mono', monospace; font-weight:400; }
-  .morph-section{ margin-top:4px; margin-bottom:18px; }
-  .morph-table{
-    background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
-    overflow:hidden;
-  }
-  .morph-row{
-    display:flex; justify-content:space-between; align-items:center;
-    padding:8px 12px; font-size:12.5px;
-    border-bottom:1px solid var(--line);
-  }
-  .morph-row:last-child{ border-bottom:none; }
-  .morph-label{ color:var(--muted); }
-  .morph-value{ font-family:'IBM Plex Mono', monospace; color:var(--text); font-weight:500; }
-  .downloads{ margin-top:8px; display:flex; flex-direction:column; gap:8px; }
-  .dl-btn{
-    display:flex; justify-content:space-between; align-items:center;
-    background:var(--panel-2); border:1px solid var(--line); color:var(--text);
-    font-family:'IBM Plex Sans', sans-serif; font-size:13.5px; font-weight:500;
-    padding:11px 14px; border-radius:8px; cursor:pointer; text-align:left;
-    transition:border-color .15s ease, background .15s ease;
-  }
-  .dl-btn:hover{ border-color:var(--water); background:#1f2a26; }
-  .dl-btn .arrow{ color:var(--water-bright); font-family:'IBM Plex Mono', monospace; }
-  .drawer-foot{
-    padding:16px 22px; border-top:1px solid var(--line);
-    font-size:11.5px; color:var(--muted); line-height:1.5;
-  }
-  .drawer-foot a{ color:var(--sand-dim); }
+# Saudi Arabia bounding box, plus a small buffer. (lon_min, lat_min, lon_max, lat_max)
+KSA_BBOX = (33.0, 14.5, 56.5, 33.5)
+UPSTREAM_URL = "https://mghydro.com/app/getwshed"
 
-  /* ---------- Loading / error toast ---------- */
-  .toast{
-    position:absolute; bottom:70px; left:50%; transform:translateX(-50%);
-    z-index:1002; background:var(--panel); border:1px solid var(--line);
-    padding:10px 18px; border-radius:10px; font-size:13px; display:none;
-    max-width:360px; text-align:center;
-  }
-  .toast.show{ display:block; }
-  .toast.error{ border-color:var(--danger); color:#f0b3a0; }
-  .toast.loading{ color:var(--muted); }
-  .spinner{
-    display:inline-block; width:11px; height:11px; border-radius:50%;
-    border:2px solid var(--line); border-top-color:var(--water-bright);
-    animation:spin .7s linear infinite; margin-right:8px; vertical-align:-1px;
-  }
-  @keyframes spin{ to{ transform:rotate(360deg); } }
 
-  /* Flowing river animation */
-  .flow-line{
-    stroke-dasharray: 6 7;
-    animation: flow 1.1s linear infinite;
-  }
-  @keyframes flow{ to{ stroke-dashoffset:13; } }
+def _in_ksa_bbox(lat, lng):
+    lon_min, lat_min, lon_max, lat_max = KSA_BBOX
+    return lon_min <= lng <= lon_max and lat_min <= lat <= lat_max
 
-  @media (max-width:600px){
-    .brand p{ display:none; }
-    .drawer{ width:100%; }
-  }
-</style>
-</head>
-<body>
 
-<div id="map"></div>
+def _ring_area_km2(ring):
+    """Spherical polygon area (standard equirectangular approximation) for
+    one [lon, lat] ring, in km^2. Accurate enough for regional-sized
+    watersheds; doesn't need geopandas/shapely (too heavy for Vercel)."""
+    if len(ring) < 3:
+        return 0.0
+    r = 6371000.0  # Earth radius, meters
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        lon1, lat1 = ring[i][0], ring[i][1]
+        lon2, lat2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += math.radians(lon2 - lon1) * (
+            2 + math.sin(math.radians(lat1)) + math.sin(math.radians(lat2))
+        )
+    return abs(total * r * r / 2.0) / 1e6
 
-<div class="coord-panel" id="coord-panel">
-  <button id="coord-toggle" class="coord-toggle">📍 Go to coordinates</button>
-  <div class="coord-form" id="coord-form" style="display:none;">
-    <input type="number" id="coord-lat" placeholder="Latitude" step="any" />
-    <input type="number" id="coord-lng" placeholder="Longitude" step="any" />
-    <button id="coord-go">Go</button>
-  </div>
-</div>
 
-<div class="brand">
-  <span class="eyebrow">Manabi &middot; منابع</span>
-  <h1>Watersheds of <span>Saudi Arabia</span></h1>
-  <p>Click any point to trace its upstream catchment or downstream flow path, using MERIT-Hydro elevation data.</p>
-</div>
+def _geometry_area_km2(geometry):
+    """Area for a Polygon or MultiPolygon geometry dict. Exterior ring
+    only (index 0) minus holes (remaining rings), per ring."""
+    if not geometry:
+        return 0.0
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon":
+        polygons = [coords]
+    elif gtype == "MultiPolygon":
+        polygons = coords
+    else:
+        return 0.0
+    area = 0.0
+    for rings in polygons:
+        if not rings:
+            continue
+        area += _ring_area_km2(rings[0])  # exterior
+        for hole in rings[1:]:
+            area -= _ring_area_km2(hole)
+    return area
 
-<div class="mode-toggle">
-  <button id="mode-up" class="active">Upstream</button>
-  <button id="mode-down" title="Not implemented in this build yet" disabled style="opacity:.4;cursor:not-allowed;">Downstream</button>
-</div>
 
-<div class="hint" id="hint"><span class="dot"></span> Click the map to delineate a watershed</div>
-<div class="basemap-toggle" id="basemap-toggle">
-  <button class="active" data-basemap="light">Map</button>
-  <button data-basemap="satellite">Satellite</button>
-</div>
-<div class="toast" id="toast"></div>
+def _snapped_outlet_latlng(outlet_fc, fallback_lat, fallback_lng):
+    """Pull the snapped-to-river outlet coordinates out of mghydro's
+    outlet FeatureCollection, falling back to the originally-clicked
+    point if no 'snapped' feature is present."""
+    features = (outlet_fc or {}).get("features") or []
+    for f in features:
+        props = f.get("properties") or {}
+        if props.get("type") == "snapped":
+            coords = (f.get("geometry") or {}).get("coordinates")
+            if coords and len(coords) >= 2:
+                return coords[1], coords[0]  # geometry is [lon, lat]
+    return fallback_lat, fallback_lng
 
-<div class="drawer" id="drawer">
-  <div class="drawer-head">
-    <div>
-      <span class="eyebrow">Result</span>
-      <h2 id="drawer-title">Watershed</h2>
-    </div>
-    <button class="drawer-close" id="drawer-close">&times;</button>
-  </div>
-  <div class="drawer-body">
-    <div class="stat">
-      <div class="label">Drainage area</div>
-      <div class="value" id="stat-area">—</div>
-    </div>
-    <div class="coord-row">
-      <div class="stat">
-        <div class="label">Snapped outlet</div>
-        <div class="value" id="stat-coords">—</div>
-      </div>
-    </div>
-    <div class="morph-section" id="morph-section" style="display:none;">
-      <div class="label" style="margin-bottom:8px;">Morphological parameters</div>
-      <div class="morph-table" id="morph-table"></div>
-    </div>
-    <div class="downloads">
-      <button class="dl-btn" id="dl-kml">Download for Google Earth <span class="arrow">KML ↓</span></button>
-      <button class="dl-btn" id="dl-watershed">Download watershed <span class="arrow">GeoJSON ↓</span></button>
-      <button class="dl-btn" id="dl-rivers">Download rivers <span class="arrow">GeoJSON ↓</span></button>
-    </div>
-  </div>
-  <div class="drawer-foot">
-    Delineation engine: <a href="https://pypi.org/project/delineator/" target="_blank">delineator</a> (MERIT-Hydro / MERIT-Basins, megabasin 29).
-  </div>
-</div>
 
-<script>
-const KSA_BOUNDS = [[12.0, 32.0], [34.0, 57.0]]; // [south,west],[north,east] — generous buffer
-const KSA_CENTER = [24.2, 45.3];
-
-const map = L.map('map', {
-  zoomControl: true,
-  minZoom: 4,
-  maxBounds: [[8, 26], [38, 63]],
-  maxBoundsViscosity: 0.6,
-}).setView(KSA_CENTER, 6);
-
-L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-  attribution: '&copy; OpenStreetMap &copy; CARTO',
-  subdomains: 'abcd',
-  maxZoom: 19,
-});
-
-// Esri World Imagery — free, no API key required, no usage restrictions
-// that would block a small project like this. (Real Google Earth imagery
-// needs a paid Google Cloud API key, which isn't worth the hassle here.)
-const satelliteTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics',
-  maxZoom: 19,
-});
-
-lightTiles.addTo(map);
-
-const basemaps = { light: lightTiles, satellite: satelliteTiles };
-let currentBasemap = 'light';
-document.querySelectorAll('#basemap-toggle button').forEach(btn => {
-  btn.onclick = () => {
-    const key = btn.dataset.basemap;
-    if (key === currentBasemap) return;
-    map.removeLayer(basemaps[currentBasemap]);
-    basemaps[key].addTo(map);
-    document.body.classList.toggle('basemap-alt', key !== 'light');
-    document.querySelectorAll('#basemap-toggle button').forEach(b => b.classList.toggle('active', b === btn));
-    currentBasemap = key;
-  };
-});
-
-let mode = 'up'; // 'up' or 'down'
-let resultLayer = L.layerGroup().addTo(map);
-let outletMarker = null;
-let lastWatershedGeoJSON = null;
-let lastRiversGeoJSON = null;
-let lastOutletsGeoJSON = null;
-
-const hint = document.getElementById('hint');
-const toast = document.getElementById('toast');
-const drawer = document.getElementById('drawer');
-
-document.getElementById('mode-up').onclick = () => setMode('up');
-document.getElementById('mode-down').onclick = () => setMode('down');
-document.getElementById('drawer-close').onclick = () => drawer.classList.remove('open');
-
-function setMode(m){
-  mode = m;
-  document.getElementById('mode-up').classList.toggle('active', m === 'up');
-  document.getElementById('mode-down').classList.toggle('active', m === 'down');
-}
-
-function showToast(html, cls){
-  toast.innerHTML = html;
-  toast.className = 'toast show ' + (cls || '');
-}
-function hideToast(){ toast.className = 'toast'; }
-
-function fmtArea(km2){
-  if (km2 == null) return '—';
-  if (km2 < 1) return (km2*1e6).toFixed(0) + '<small>m²</small>';
-  if (km2 > 10000) return (km2/1000).toFixed(1) + '<small>k km²</small>';
-  return km2.toLocaleString(undefined, {maximumFractionDigits:1}) + '<small>km²</small>';
-}
-
-// key -> [display label, unit]. Only keys present in the response are shown,
-// so this works whether or not river-based parameters were computed.
-const MORPH_LABELS = {
-  perimeter_km:                 ['Perimeter', 'km'],
-  basin_length_km:              ['Basin length', 'km'],
-  form_factor:                  ['Form factor', ''],
-  circularity_ratio:            ['Circularity ratio', ''],
-  elongation_ratio:             ['Elongation ratio', ''],
-  compactness_coefficient:      ['Compactness coefficient', ''],
-  total_stream_length_km:       ['Total stream length', 'km'],
-  num_stream_segments:          ['Stream segments', ''],
-  drainage_density_km_per_km2:  ['Drainage density', 'km/km²'],
-  stream_frequency_per_km2:     ['Stream frequency', '/km²'],
-  length_of_overland_flow_km:   ['Overland flow length', 'km'],
-};
-
-function renderMorphology(morph){
-  const section = document.getElementById('morph-section');
-  const table = document.getElementById('morph-table');
-  if (!morph){
-    section.style.display = 'none';
-    table.innerHTML = '';
-    return;
-  }
-  table.innerHTML = Object.entries(MORPH_LABELS)
-    .filter(([key]) => morph[key] !== undefined && morph[key] !== null)
-    .map(([key, [label, unit]]) => `
-      <div class="morph-row">
-        <span class="morph-label">${label}</span>
-        <span class="morph-value">${morph[key]}${unit ? ' ' + unit : ''}</span>
-      </div>
-    `).join('');
-  section.style.display = 'block';
-}
-
-function download(obj, filename){
-  const blob = new Blob([JSON.stringify(obj)], {type:'application/geo+json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function downloadText(text, filename, mime){
-  const blob = new Blob([text], {type: mime});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-}
-
-// ---------- GeoJSON -> KML, for opening results in Google Earth ----------
-function escapeXml(s){
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function toKmlColor(hex, alphaHex){
-  hex = hex.replace('#','');
-  const r = hex.slice(0,2), g = hex.slice(2,4), b = hex.slice(4,6);
-  return (alphaHex || 'ff') + b + g + r; // KML wants aabbggrr
-}
-function coordsToKmlStr(coords){
-  return coords.map(c => c.slice(0,3).join(',')).join(' ');
-}
-function polygonToKmlGeom(coordinates){
-  const outer = coordinates[0];
-  let inner = '';
-  for (let i = 1; i < coordinates.length; i++){
-    inner += `<innerBoundaryIs><LinearRing><coordinates>${coordsToKmlStr(coordinates[i])}</coordinates></LinearRing></innerBoundaryIs>`;
-  }
-  return `<Polygon><outerBoundaryIs><LinearRing><coordinates>${coordsToKmlStr(outer)}</coordinates></LinearRing></outerBoundaryIs>${inner}</Polygon>`;
-}
-function geometryToKml(geom){
-  if (!geom) return '';
-  switch (geom.type){
-    case 'Polygon': return polygonToKmlGeom(geom.coordinates);
-    case 'MultiPolygon': return `<MultiGeometry>${geom.coordinates.map(polygonToKmlGeom).join('')}</MultiGeometry>`;
-    case 'LineString': return `<LineString><coordinates>${coordsToKmlStr(geom.coordinates)}</coordinates></LineString>`;
-    case 'MultiLineString': return `<MultiGeometry>${geom.coordinates.map(line => `<LineString><coordinates>${coordsToKmlStr(line)}</coordinates></LineString>`).join('')}</MultiGeometry>`;
-    case 'Point': return `<Point><coordinates>${geom.coordinates.slice(0,3).join(',')}</coordinates></Point>`;
-    case 'MultiPoint': return `<MultiGeometry>${geom.coordinates.map(c => `<Point><coordinates>${c.slice(0,3).join(',')}</coordinates></Point>`).join('')}</MultiGeometry>`;
-    default: return '';
-  }
-}
-function buildKML(watershedGJ, riversGJ, outletsGJ, title){
-  let placemarks = '';
-  (watershedGJ && watershedGJ.features || []).forEach(f => {
-    placemarks += `<Placemark><name>Watershed boundary</name><styleUrl>#watershedStyle</styleUrl>${geometryToKml(f.geometry)}</Placemark>`;
-  });
-  (riversGJ && riversGJ.features || []).forEach(f => {
-    placemarks += `<Placemark><name>River</name><styleUrl>#riverStyle</styleUrl>${geometryToKml(f.geometry)}</Placemark>`;
-  });
-  (outletsGJ && outletsGJ.features || []).forEach(f => {
-    const label = (f.properties && f.properties.type === 'snapped') ? 'Snapped outlet' : 'Outlet';
-    placemarks += `<Placemark><name>${escapeXml(label)}</name><styleUrl>#outletStyle</styleUrl>${geometryToKml(f.geometry)}</Placemark>`;
-  });
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-<Document>
-<name>${escapeXml(title)}</name>
-<Style id="watershedStyle">
-  <LineStyle><color>${toKmlColor('#b08d53')}</color><width>2</width></LineStyle>
-  <PolyStyle><color>${toKmlColor('#1f7a72','4d')}</color></PolyStyle>
-</Style>
-<Style id="riverStyle">
-  <LineStyle><color>${toKmlColor('#12938a')}</color><width>3</width></LineStyle>
-</Style>
-<Style id="outletStyle">
-  <IconStyle>
-    <color>${toKmlColor('#12938a')}</color>
-    <Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>
-  </IconStyle>
-</Style>
-${placemarks}
-</Document>
-</kml>`;
-}
-
-document.getElementById('dl-kml').onclick = () => {
-  if (!lastWatershedGeoJSON) return;
-  const kml = buildKML(lastWatershedGeoJSON, lastRiversGeoJSON, lastOutletsGeoJSON, 'Watershed — Manabi');
-  downloadText(kml, 'watershed.kml', 'application/vnd.google-earth.kml+xml');
-};
-document.getElementById('dl-watershed').onclick = () => {
-  if (lastWatershedGeoJSON) download(lastWatershedGeoJSON, 'watershed.geojson');
-};
-document.getElementById('dl-rivers').onclick = () => {
-  if (lastRiversGeoJSON) download(lastRiversGeoJSON, 'rivers.geojson');
-};
-
-async function runDelineation(lat, lng){
-  hint.style.opacity = 0;
-  showToast('<span class="spinner"></span>Delineating watershed…', 'loading');
-
-  resultLayer.clearLayers();
-  if (outletMarker) { map.removeLayer(outletMarker); outletMarker = null; }
-
-  try {
-    const resp = await fetch('/api/delineate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ lat, lng, mode })
-    });
-    const data = await resp.json();
-
-    if (!resp.ok) {
-      showToast(data.error || 'Something went wrong.', 'error');
-      setTimeout(hideToast, 3500);
-      return;
+def _wrap_watershed(watershed_geom, outlet_fc, req_lat, req_lng):
+    """Wrap mghydro's bare watershed Polygon/MultiPolygon into the
+    FeatureCollection-with-properties shape the frontend expects
+    (matching what the real `delineator`-backed app.py produces)."""
+    if not watershed_geom:
+        return None
+    outlet_lat, outlet_lng = _snapped_outlet_latlng(outlet_fc, req_lat, req_lng)
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": {
+                "area_km2": round(_geometry_area_km2(watershed_geom), 2),
+                "outlet_lat": outlet_lat,
+                "outlet_lng": outlet_lng,
+            },
+            "geometry": watershed_geom,
+        }],
     }
 
-    hideToast();
-    lastWatershedGeoJSON = data.watershed;
-    lastRiversGeoJSON = data.rivers;
-    lastOutletsGeoJSON = data.outlets;
 
-    if (data.watershed) {
-      const wLayer = L.geoJSON(data.watershed, {
-        style: { color: '#b08d53', weight: 1.5, fillColor: '#1f7a72', fillOpacity: 0.18 }
-      }).addTo(resultLayer);
-      map.fitBounds(wLayer.getBounds(), { padding: [60, 60] });
+# ---------- Morphological parameters (pure Python, no dependencies) ----------
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0088  # mean Earth radius, km
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _largest_exterior_ring(geometry):
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon":
+        return coords[0] if coords else []
+    elif gtype == "MultiPolygon":
+        if not coords:
+            return []
+        best = max(coords, key=lambda poly: len(poly[0]) if poly else 0)
+        return best[0] if best else []
+    return []
+
+
+def _ring_perimeter_km(ring):
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        lon1, lat1 = ring[i][0], ring[i][1]
+        lon2, lat2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += _haversine_km(lat1, lon1, lat2, lon2)
+    return total
+
+
+def compute_morphology(watershed_geom, rivers_fc, outlet_lat, outlet_lng, area_km2_hint):
+    """Same parameters as the real backend's morphology.py, computed with
+    haversine-distance approximations instead of a local UTM projection
+    (which would need pyproj — too heavy to add here). Verified against
+    the same hand-calculable rectangle test case; see chat notes."""
+    ring = _largest_exterior_ring(watershed_geom)
+    if not ring or len(ring) < 3:
+        return None
+
+    perimeter_km = _ring_perimeter_km(ring)
+    basin_length_km = max(_haversine_km(outlet_lat, outlet_lng, pt[1], pt[0]) for pt in ring)
+    area_km2 = area_km2_hint
+
+    form_factor = area_km2 / (basin_length_km ** 2) if basin_length_km else None
+    circularity_ratio = (4 * math.pi * area_km2) / (perimeter_km ** 2) if perimeter_km else None
+    elongation_ratio = (2 / basin_length_km) * math.sqrt(area_km2 / math.pi) if basin_length_km else None
+    compactness_coefficient = 0.2821 * perimeter_km / math.sqrt(area_km2) if area_km2 else None
+
+    result = {
+        "perimeter_km": round(perimeter_km, 2),
+        "basin_length_km": round(basin_length_km, 2),
+        "form_factor": round(form_factor, 4) if form_factor else None,
+        "circularity_ratio": round(circularity_ratio, 4) if circularity_ratio else None,
+        "elongation_ratio": round(elongation_ratio, 4) if elongation_ratio else None,
+        "compactness_coefficient": round(compactness_coefficient, 4) if compactness_coefficient else None,
     }
 
-    if (data.rivers) {
-      L.geoJSON(data.rivers, {
-        style: { color: '#12938a', weight: 2, className: 'flow-line' }
-      }).addTo(resultLayer);
-    }
-
-    if (data.outlets) {
-      L.geoJSON(data.outlets, {
-        pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
-          radius: feature.properties.type === 'snapped' ? 5 : 3,
-          color: feature.properties.type === 'snapped' ? '#12938a' : '#6b5f4d',
-          fillColor: feature.properties.type === 'snapped' ? '#12938a' : '#6b5f4d',
-          fillOpacity: 0.9, weight: 1.5,
+    features = (rivers_fc or {}).get("features") or []
+    if features:
+        total_len = 0.0
+        for f in features:
+            geom = f.get("geometry") or {}
+            gtype = geom.get("type")
+            lines = geom.get("coordinates") or []
+            if gtype == "LineString":
+                lines = [lines]
+            elif gtype != "MultiLineString":
+                continue
+            for line in lines:
+                for i in range(len(line) - 1):
+                    lon1, lat1 = line[i][0], line[i][1]
+                    lon2, lat2 = line[i + 1][0], line[i + 1][1]
+                    total_len += _haversine_km(lat1, lon1, lat2, lon2)
+        num_segments = len(features)
+        drainage_density = total_len / area_km2 if area_km2 else None
+        stream_frequency = num_segments / area_km2 if area_km2 else None
+        overland_flow_length = 1 / (2 * drainage_density) if drainage_density else None
+        result.update({
+            "total_stream_length_km": round(total_len, 2),
+            "num_stream_segments": num_segments,
+            "drainage_density_km_per_km2": round(drainage_density, 3) if drainage_density else None,
+            "stream_frequency_per_km2": round(stream_frequency, 3) if stream_frequency else None,
+            "length_of_overland_flow_km": round(overland_flow_length, 3) if overland_flow_length else None,
         })
-      }).addTo(resultLayer);
-    }
 
-    const props = (data.watershed && data.watershed.features[0] && data.watershed.features[0].properties) || {};
-    document.getElementById('stat-area').innerHTML = fmtArea(props.area_km2);
-    document.getElementById('stat-coords').textContent =
-      (props.outlet_lat != null) ? `${props.outlet_lat}, ${props.outlet_lng}` : `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
-    document.getElementById('drawer-title').textContent =
-      mode === 'up' ? 'Upstream watershed' : 'Downstream flow path';
-    renderMorphology(data.morphology);
-    drawer.classList.add('open');
+    return result
 
-  } catch (err) {
-    showToast('Could not reach the server.', 'error');
-    setTimeout(hideToast, 3500);
-  }
-}
 
-map.on('click', (e) => {
-  runDelineation(e.latlng.lat, e.latlng.lng);
-});
+class handler(BaseHTTPRequestHandler):
+    def _send_json(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-// ---------- Coordinate input panel ----------
-const coordForm = document.getElementById('coord-form');
-document.getElementById('coord-toggle').onclick = () => {
-  coordForm.style.display = (coordForm.style.display === 'none') ? 'flex' : 'none';
-};
+    def _route(self):
+        """The real requested path arrives as ?path=... (see vercel.json's
+        rewrite destination), since Vercel replaces self.path with the
+        rewrite's destination path itself, not the original request path."""
+        query = parse_qs(urlparse(self.path).query)
+        return (query.get("path", [""])[0] or "").strip("/")
 
-function goToCoordinates(){
-  const lat = parseFloat(document.getElementById('coord-lat').value);
-  const lng = parseFloat(document.getElementById('coord-lng').value);
-  if (Number.isNaN(lat) || Number.isNaN(lng)){
-    showToast('Enter valid latitude and longitude values.', 'error');
-    setTimeout(hideToast, 3000);
-    return;
-  }
-  map.setView([lat, lng], Math.max(map.getZoom(), 9));
-  runDelineation(lat, lng);
-}
+    def do_GET(self):
+        route = self._route()
+        if route == "status":
+            self._send_json(200, {"status": "proxy running", "received_path": self.path})
+            return
+        self._send_json(404, {"error": "Not found", "received_path": self.path})
 
-document.getElementById('coord-go').onclick = goToCoordinates;
-document.getElementById('coord-lat').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
-document.getElementById('coord-lng').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
-</script>
-</body>
-</html>
+    def do_POST(self):
+        route = self._route()
+        if route != "delineate":
+            self._send_json(404, {"error": "Not found", "received_path": self.path})
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "Invalid JSON body."})
+            return
+
+        lat, lng = body.get("lat"), body.get("lng")
+        mode = body.get("mode", "up")
+
+        if lat is None or lng is None:
+            self._send_json(400, {"error": "Request body must include 'lat' and 'lng'."})
+            return
+
+        if mode == "down":
+            self._send_json(501, {
+                "error": "Downstream flow-path tracing isn't implemented in this build."
+            })
+            return
+
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "'lat' and 'lng' must be numeric."})
+            return
+
+        if not _in_ksa_bbox(lat, lng):
+            self._send_json(400, {
+                "error": "That point is outside the Saudi Arabia / Arabian Peninsula "
+                         "coverage area of this tool."
+            })
+            return
+
+        try:
+            resp = requests.get(
+                UPSTREAM_URL,
+                params={
+                    "task": "watershed",
+                    "lat": lat,
+                    "lng": lng,
+                    "precision": "high",
+                    "simplify": "true",
+                    "source": "merit",
+                },
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=9,
+            )
+        except requests.RequestException as e:
+            self._send_json(502, {"error": f"Upstream request failed: {e}"})
+            return
+
+        if resp.status_code != 200:
+            self._send_json(502, {
+                "error": f"Upstream delineation service returned {resp.status_code}."
+            })
+            return
+
+        try:
+            data = resp.json()
+        except ValueError:
+            self._send_json(502, {"error": "Upstream service returned an invalid response."})
+            return
+
+        outlet_fc = data.get("outlet")
+        watershed_geom = data.get("watershed")
+        rivers_fc = data.get("rivers")
+        watershed_wrapped = _wrap_watershed(watershed_geom, outlet_fc, lat, lng)
+
+        morphology = None
+        if watershed_wrapped:
+            area_km2 = watershed_wrapped["features"][0]["properties"]["area_km2"]
+            outlet_lat = watershed_wrapped["features"][0]["properties"]["outlet_lat"]
+            outlet_lng = watershed_wrapped["features"][0]["properties"]["outlet_lng"]
+            try:
+                morphology = compute_morphology(watershed_geom, rivers_fc, outlet_lat, outlet_lng, area_km2)
+            except Exception:
+                morphology = None  # don't let a morphology bug break the whole response
+
+        self._send_json(200, {
+            "watershed": watershed_wrapped,
+            "rivers": rivers_fc,
+            "outlets": outlet_fc,
+            "morphology": morphology,
+        })
