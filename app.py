@@ -25,9 +25,11 @@ import traceback
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 import data_dir  # noqa: F401  (sets DELINEATOR_DATA_DIR before delineator loads)
+import vercel_numba_fix  # noqa: F401  (must come before numba is imported — see file)
 import vercel_skimage_fix  # noqa: F401  (harmless no-op outside Vercel — see file for why)
 from delineator.core import delineate
 from delineator.settings import DelineatorConfig
+from morphology import compute_morphology
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,10 +110,19 @@ def delineate_endpoint() -> Response:
     def to_geojson(gdf):
         return None if gdf is None else json.loads(gdf.to_json())
 
+    try:
+        morphology = compute_morphology(watershed_gdf, rivers_gdf, lat, lng)
+    except Exception:
+        # Don't let a morphology calculation bug break the whole request —
+        # the watershed/rivers/outlets are still useful without it.
+        logger.error("Morphology calculation failed:\n%s", traceback.format_exc())
+        morphology = None
+
     return jsonify({
         "watershed": to_geojson(watershed_gdf),
         "rivers": to_geojson(rivers_gdf),
         "outlets": to_geojson(outlets_gdf),
+        "morphology": morphology,
     })
 
 
