@@ -86,6 +86,35 @@
     background:var(--water); color:#0d1a18;
   }
 
+  /* ---------- Coordinate input ---------- */
+  .coord-panel{
+    position:absolute; top:20px; left:50%; transform:translateX(-50%);
+    z-index:1000; display:flex; flex-direction:column; align-items:center; gap:6px;
+  }
+  .coord-toggle{
+    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
+    background:var(--panel); border:1px solid var(--line); color:var(--muted);
+    padding:9px 16px; border-radius:999px; cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .coord-toggle:hover{ color:var(--text); }
+  .coord-form{
+    display:flex; gap:6px; align-items:center;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:8px; box-shadow:0 4px 16px rgba(0,0,0,0.08);
+  }
+  .coord-form input{
+    width:110px; font-family:'IBM Plex Mono', monospace; font-size:13px;
+    background:var(--panel-2); border:1px solid var(--line); border-radius:6px;
+    padding:7px 9px; color:var(--text);
+  }
+  .coord-form input::placeholder{ color:var(--muted); }
+  .coord-form button{
+    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
+    background:var(--water); color:#0d1a18; border:none;
+    padding:8px 14px; border-radius:6px; cursor:pointer;
+  }
+
   /* ---------- Basemap toggle ---------- */
   .basemap-toggle{
     position:absolute; bottom:24px; left:20px; z-index:1000;
@@ -150,6 +179,19 @@
   .coord-row{ display:flex; gap:14px; }
   .coord-row .stat{ flex:1; }
   .coord-row .value{ font-size:16px; font-family:'IBM Plex Mono', monospace; font-weight:400; }
+  .morph-section{ margin-top:4px; margin-bottom:18px; }
+  .morph-table{
+    background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
+    overflow:hidden;
+  }
+  .morph-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 12px; font-size:12.5px;
+    border-bottom:1px solid var(--line);
+  }
+  .morph-row:last-child{ border-bottom:none; }
+  .morph-label{ color:var(--muted); }
+  .morph-value{ font-family:'IBM Plex Mono', monospace; color:var(--text); font-weight:500; }
   .downloads{ margin-top:8px; display:flex; flex-direction:column; gap:8px; }
   .dl-btn{
     display:flex; justify-content:space-between; align-items:center;
@@ -200,6 +242,15 @@
 
 <div id="map"></div>
 
+<div class="coord-panel" id="coord-panel">
+  <button id="coord-toggle" class="coord-toggle">📍 Go to coordinates</button>
+  <div class="coord-form" id="coord-form" style="display:none;">
+    <input type="number" id="coord-lat" placeholder="Latitude" step="any" />
+    <input type="number" id="coord-lng" placeholder="Longitude" step="any" />
+    <button id="coord-go">Go</button>
+  </div>
+</div>
+
 <div class="brand">
   <span class="eyebrow">Manabi &middot; منابع</span>
   <h1>Watersheds of <span>Saudi Arabia</span></h1>
@@ -236,6 +287,10 @@
         <div class="label">Snapped outlet</div>
         <div class="value" id="stat-coords">—</div>
       </div>
+    </div>
+    <div class="morph-section" id="morph-section" style="display:none;">
+      <div class="label" style="margin-bottom:8px;">Morphological parameters</div>
+      <div class="morph-table" id="morph-table"></div>
     </div>
     <div class="downloads">
       <button class="dl-btn" id="dl-kml">Download for Google Earth <span class="arrow">KML ↓</span></button>
@@ -323,6 +378,41 @@ function fmtArea(km2){
   if (km2 < 1) return (km2*1e6).toFixed(0) + '<small>m²</small>';
   if (km2 > 10000) return (km2/1000).toFixed(1) + '<small>k km²</small>';
   return km2.toLocaleString(undefined, {maximumFractionDigits:1}) + '<small>km²</small>';
+}
+
+// key -> [display label, unit]. Only keys present in the response are shown,
+// so this works whether or not river-based parameters were computed.
+const MORPH_LABELS = {
+  perimeter_km:                 ['Perimeter', 'km'],
+  basin_length_km:              ['Basin length', 'km'],
+  form_factor:                  ['Form factor', ''],
+  circularity_ratio:            ['Circularity ratio', ''],
+  elongation_ratio:             ['Elongation ratio', ''],
+  compactness_coefficient:      ['Compactness coefficient', ''],
+  total_stream_length_km:       ['Total stream length', 'km'],
+  num_stream_segments:          ['Stream segments', ''],
+  drainage_density_km_per_km2:  ['Drainage density', 'km/km²'],
+  stream_frequency_per_km2:     ['Stream frequency', '/km²'],
+  length_of_overland_flow_km:   ['Overland flow length', 'km'],
+};
+
+function renderMorphology(morph){
+  const section = document.getElementById('morph-section');
+  const table = document.getElementById('morph-table');
+  if (!morph){
+    section.style.display = 'none';
+    table.innerHTML = '';
+    return;
+  }
+  table.innerHTML = Object.entries(MORPH_LABELS)
+    .filter(([key]) => morph[key] !== undefined && morph[key] !== null)
+    .map(([key, [label, unit]]) => `
+      <div class="morph-row">
+        <span class="morph-label">${label}</span>
+        <span class="morph-value">${morph[key]}${unit ? ' ' + unit : ''}</span>
+      </div>
+    `).join('');
+  section.style.display = 'block';
 }
 
 function download(obj, filename){
@@ -421,8 +511,7 @@ document.getElementById('dl-rivers').onclick = () => {
   if (lastRiversGeoJSON) download(lastRiversGeoJSON, 'rivers.geojson');
 };
 
-map.on('click', async (e) => {
-  const { lat, lng } = e.latlng;
+async function runDelineation(lat, lng){
   hint.style.opacity = 0;
   showToast('<span class="spinner"></span>Delineating watershed…', 'loading');
 
@@ -478,13 +567,40 @@ map.on('click', async (e) => {
       (props.outlet_lat != null) ? `${props.outlet_lat}, ${props.outlet_lng}` : `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
     document.getElementById('drawer-title').textContent =
       mode === 'up' ? 'Upstream watershed' : 'Downstream flow path';
+    renderMorphology(data.morphology);
     drawer.classList.add('open');
 
   } catch (err) {
     showToast('Could not reach the server.', 'error');
     setTimeout(hideToast, 3500);
   }
+}
+
+map.on('click', (e) => {
+  runDelineation(e.latlng.lat, e.latlng.lng);
 });
+
+// ---------- Coordinate input panel ----------
+const coordForm = document.getElementById('coord-form');
+document.getElementById('coord-toggle').onclick = () => {
+  coordForm.style.display = (coordForm.style.display === 'none') ? 'flex' : 'none';
+};
+
+function goToCoordinates(){
+  const lat = parseFloat(document.getElementById('coord-lat').value);
+  const lng = parseFloat(document.getElementById('coord-lng').value);
+  if (Number.isNaN(lat) || Number.isNaN(lng)){
+    showToast('Enter valid latitude and longitude values.', 'error');
+    setTimeout(hideToast, 3000);
+    return;
+  }
+  map.setView([lat, lng], Math.max(map.getZoom(), 9));
+  runDelineation(lat, lng);
+}
+
+document.getElementById('coord-go').onclick = goToCoordinates;
+document.getElementById('coord-lat').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
+document.getElementById('coord-lng').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
 </script>
 </body>
 </html>
