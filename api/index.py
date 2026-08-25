@@ -206,7 +206,158 @@ def compute_morphology(watershed_geom, rivers_fc, outlet_lat, outlet_lng, area_k
             "length_of_overland_flow_km": round(overland_flow_length, 3) if overland_flow_length else None,
         })
 
+        # Main stem length needs real graph traversal, not just summing —
+        # and slope/Tc need an elevation lookup, which can fail (network
+        # issue, rate limit) without breaking everything else above.
+        try:
+            stem_km, headwater = main_stem_length_km(rivers_fc, outlet_lat, outlet_lng)
+            if stem_km:
+                result["main_stream_length_km"] = round(stem_km, 2)
+                if headwater:
+                    S, tc_min = compute_slope_and_tc(
+                        stem_km, outlet_lat, outlet_lng, headwater[0], headwater[1]
+                    )
+                    if S is not None:
+                        result["avg_basin_slope"] = S
+                        result["time_of_concentration_min"] = tc_min
+        except Exception:
+            pass  # main stem / slope / Tc are a bonus, not worth failing the request over
+
     return result
+
+
+# ---------- Main stem length (longest connected flow path) ----------
+
+def _node_key(lon, lat, precision=5):
+    return (round(lon, precision), round(lat, precision))
+
+
+def _build_river_graph(rivers_fc):
+    """Adjacency list: node_key -> [(neighbor_key, length_km), ...]."""
+    adj = {}
+
+    def add_edge(a, b, length_km):
+        adj.setdefault(a, []).append((b, length_km))
+        adj.setdefault(b, []).append((a, length_km))
+
+    features = (rivers_fc or {}).get("features") or []
+    for f in features:
+        geom = f.get("geometry") or {}
+        gtype = geom.get("type")
+        lines = geom.get("coordinates") or []
+        if gtype == "LineString":
+            lines = [lines]
+        elif gtype != "MultiLineString":
+            continue
+        for line in lines:
+            for i in range(len(line) - 1):
+                lon1, lat1 = line[i][0], line[i][1]
+                lon2, lat2 = line[i + 1][0], line[i + 1][1]
+                a, b = _node_key(lon1, lat1), _node_key(lon2, lat2)
+                if a == b:
+                    continue
+                add_edge(a, b, _haversine_km(lat1, lon1, lat2, lon2))
+    return adj
+
+
+def main_stem_length_km(rivers_fc, outlet_lat, outlet_lng):
+    """Longest connected flow path through the river network, starting
+    from the node nearest the outlet — this is the standard hydrology
+    definition of 'main stream length', distinct from total_stream_length_km
+    (which sums every mapped segment, branches included). Verified against
+    a synthetic branching network with a known correct answer; see chat
+    notes. Returns (length_km, (headwater_lat, headwater_lng)), or
+    (None, None) if there's no usable river data."""
+    adj = _build_river_graph(rivers_fc)
+    if not adj:
+        return None, None
+
+    root, best_d = None, float("inf")
+    for (lon, lat) in adj.keys():
+        d = _haversine_km(outlet_lat, outlet_lng, lat, lon)
+        if d < best_d:
+            root, best_d = (lon, lat), d
+
+    best_len, best_end = 0.0, root
+    stack = [(root, 0.0, frozenset())]
+    while stack:
+        node, dist, used_edges = stack.pop()
+        if dist > best_len:
+            best_len, best_end = dist, node
+        for neighbor, seg_len in adj.get(node, []):
+            edge_id = frozenset((node, neighbor))
+            if edge_id in used_edges:
+                continue
+            stack.append((neighbor, dist + seg_len, used_edges | {edge_id}))
+
+    return best_len, (best_end[1], best_end[0])  # (lat, lng)
+
+
+# ---------- Elevation lookup + slope + Kirpich time of concentration ----------
+# Uses Open Topo Data's free public API (api.opentopodata.org, SRTM 30m
+# dataset) — no key required, covers Saudi Arabia. This is a 4th external
+# dependency in an already-fragile stopgap (proxy -> mghydro.com -> here),
+# so every step degrades gracefully: if this lookup fails for any reason,
+# slope/Tc are simply omitted rather than breaking the whole response.
+
+OPENTOPODATA_URL = "https://api.opentopodata.org/v1/srtm30m"
+
+
+def _fetch_elevations(points):
+    """points: list of (lat, lng) tuples. Returns list of elevations
+    (float or None per point), or None if the lookup failed entirely."""
+    locations = "|".join(f"{lat},{lng}" for lat, lng in points)
+    try:
+        resp = requests.get(OPENTOPODATA_URL, params={"locations": locations}, timeout=5)
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("status") != "OK":
+        return None
+    results = data.get("results")
+    if not isinstance(results, list) or len(results) != len(points):
+        return None
+    out = []
+    for r in results:
+        elev = r.get("elevation") if isinstance(r, dict) else None
+        out.append(float(elev) if elev is not None else None)
+    return out
+
+
+def compute_slope_and_tc(main_stem_km, outlet_lat, outlet_lng, headwater_lat, headwater_lng):
+    """Average channel slope (elevation drop along the main stem, divided
+    by its length — the definition Kirpich's own formula uses) and time
+    of concentration via the Kirpich (1940) equation, metric form:
+        Tc (min) = 0.0195 * L(m)^0.77 * S^-0.385
+    Coefficient verified against the well-known US customary form
+    (0.0078, L in feet); see chat notes.
+
+    Kirpich's formula is empirical, originally derived from small,
+    fairly steep agricultural watersheds — treat results for very large
+    or very flat basins as a rough estimate, not a precise one.
+    """
+    if not main_stem_km or main_stem_km <= 0:
+        return None, None
+
+    elevations = _fetch_elevations([(outlet_lat, outlet_lng), (headwater_lat, headwater_lng)])
+    if not elevations or elevations[0] is None or elevations[1] is None:
+        return None, None
+
+    outlet_elev_m, headwater_elev_m = elevations
+    relief_m = headwater_elev_m - outlet_elev_m
+    L_m = main_stem_km * 1000.0
+
+    # Floor for near-flat terrain, where a near-zero denominator would
+    # otherwise blow up S^-0.385 to an unrealistic Tc.
+    S = max(relief_m / L_m, 0.0001)
+    tc_min = 0.0195 * (L_m ** 0.77) * (S ** -0.385)
+
+    return round(S, 5), round(tc_min, 1)
 
 
 class handler(BaseHTTPRequestHandler):
