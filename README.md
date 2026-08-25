@@ -72,3 +72,7 @@ Delineation engine: `delineator` by Matthew Heberger (MIT license).
 Data: MERIT-Hydro (Yamazaki et al.) and MERIT-Basins (Lin et al.).
 This project is an independent frontend/scoping layer around that engine —
 not affiliated with mghydro.com.
+## Documentation
+See [Manabi_User_Manual.pdf](Manabi_User_Manual.pdf) for full usage instructions, 
+morphological parameter definitions, and validation results against real HEC-GeoHMS 
+data for Wadi Allith (5 sub-basins, 91.8–99.1% shape agreement).
