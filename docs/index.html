@@ -261,12 +261,11 @@ const map = L.map('map', {
 
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-const lightTiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors',
-  subdomains: 'abc',
-  maxZoom: 19,
+const lightTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles &copy; Esri',
+  maxZoom: 16,
 });
-
+  
 // Esri World Imagery — free, no API key required, no usage restrictions
 // that would block a small project like this. (Real Google Earth imagery
 // needs a paid Google Cloud API key, which isn't worth the hassle here.)
