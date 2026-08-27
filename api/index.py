@@ -1,3 +1,11 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import urllib.request
+import json
+
+app = Flask(__name__)
+CORS(app)
+
 @app.route('/api/delineate', methods=['POST', 'GET'])
 @app.route('/delineate', methods=['POST', 'GET'])
 def delineate():
@@ -12,13 +20,11 @@ def delineate():
 
         headers = {'User-Agent': 'Mozilla/5.0'}
 
-        # Watershed boundary polygon
         wshed_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision=high"
         req = urllib.request.Request(wshed_url, headers=headers)
         with urllib.request.urlopen(req, timeout=25) as response:
             watershed_data = json.loads(response.read().decode('utf-8'))
 
-        # Upstream river network (optional - don't fail the whole request if this part breaks)
         rivers_data = None
         try:
             rivers_url = f"https://mghydro.com/app/upstream_rivers_api?lat={lat}&lng={lng}"
@@ -40,3 +46,8 @@ def delineate():
         }), 200
     except Exception as e:
         return jsonify({'error': f'Server error: {str(e)}'}), 500
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    return jsonify({'message': 'KSA Watersheds API active'}), 200
