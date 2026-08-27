@@ -316,9 +316,9 @@ const map = L.map('map', {
 
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-const lightTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles &copy; Esri',
-  maxZoom: 16,
+const lightTiles = L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2anf_1_b33879543c02a6af4f4dcef0', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  maxZoom: 19,
 });
 
 // Esri World Imagery — free, no API key required, no usage restrictions
