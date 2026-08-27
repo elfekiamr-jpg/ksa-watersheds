@@ -126,7 +126,14 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         return {}
 
     perimeter_km = polygon_perimeter_km(ring)
-    area_km2 = area_km2_hint if area_km2_hint else polygon_area_km2(ring, outlet_lat)
+
+    try:
+        area_km2 = float(area_km2_hint) if area_km2_hint else None
+    except (TypeError, ValueError):
+        area_km2 = None
+    if not area_km2:
+        area_km2 = polygon_area_km2(ring, outlet_lat)
+
     basin_length_km, far_pt = farthest_point_km(ring, outlet_lat, outlet_lng)
 
     form_factor = area_km2 / (basin_length_km ** 2) if basin_length_km > 0 else None
