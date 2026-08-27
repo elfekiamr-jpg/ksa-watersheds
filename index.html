@@ -353,19 +353,22 @@ function fmtArea(km2){
 }
 
 const MORPH_LABELS = {
-  perimeter_km:                ['Perimeter', 'km'],
-  basin_length_km:             ['Basin length', 'km'],
-  form_factor:                 ['Form factor', ''],
-  circularity_ratio:           ['Circularity ratio', ''],
-  elongation_ratio:            ['Elongation ratio', ''],
-  compactness_coefficient:     ['Compactness coefficient', ''],
-  total_stream_length_km:      ['Total stream length', 'km'],
-  num_stream_segments:         ['Stream segments', ''],
+  perimeter_km: ['Perimeter', 'km'],
+  basin_length_km: ['Basin length', 'km'],
+  main_stream_length_km: ['Main stream length', 'km'],
+  form_factor: ['Form factor', ''],
+  circularity_ratio: ['Circularity ratio', ''],
+  elongation_ratio: ['Elongation ratio', ''],
+  compactness_coefficient: ['Compactness coefficient', ''],
+  total_stream_length_km: ['Total stream length', 'km'],
+  num_stream_segments: ['Stream segments', ''],
   drainage_density_km_per_km2: ['Drainage density', 'km/km²'],
-  stream_frequency_per_km2:    ['Stream frequency', '/km²'],
-  length_of_overland_flow_km:  ['Overland flow length', 'km'],
+  stream_frequency_per_km2: ['Stream frequency', '/km²'],
+  length_of_overland_flow_km: ['Overland flow length', 'km'],
+  time_of_concentration_min: ['Time of concentration', 'min'],
+  lag_time_min: ['Time lag', 'min'],
 };
-
+  
 function renderMorphology(morph){
   const section = document.getElementById('morph-section');
   const table = document.getElementById('morph-table');
