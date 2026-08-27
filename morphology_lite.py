@@ -143,10 +143,10 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         'compactness_coefficient': round(compactness_coefficient, 4) if compactness_coefficient else None,
         'total_stream_length_km': round(river_stats['total_length_km'], 2),
         'main_stream_length_km': round(river_stats['main_stream_length_km'], 2),
-        'stream_segments': river_stats['segment_count'],
+        'num_stream_segments': river_stats['segment_count'],
         'drainage_density_km_per_km2': round(drainage_density, 4) if drainage_density else None,
         'stream_frequency_per_km2': round(stream_frequency, 4) if stream_frequency else None,
-        'overland_flow_length_km': round(overland_flow_length_km, 4) if overland_flow_length_km else None,
+        'length_of_overland_flow_km': round(overland_flow_length_km, 4) if overland_flow_length_km else None,
         'time_of_concentration_min': None,
         'avg_basin_slope': None,
     }
