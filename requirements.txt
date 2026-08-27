@@ -1,7 +1,3 @@
-# This file is what Vercel's build picks up automatically — it must stay
-# minimal, since it's used for the lightweight proxy backend (api/index.py),
-# NOT the real app.py. The full backend's dependencies now live in
-# requirements-docker.txt instead (see Dockerfile), specifically so Vercel
-# never installs the heavy geospatial stack (delineator, numba, rasterio...)
-# for a function that doesn't even import them.
-requests>=2.31
+Flask>=3.0.0
+flask-cors>=4.0.0
+requests>=2.31.0
