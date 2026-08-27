@@ -34,7 +34,6 @@
     position:absolute; inset:0;
     background:var(--bg);
   }
-  /* Leaflet light base tweaks */
   .leaflet-tile-pane{ filter: saturate(0.85) brightness(1.02); }
   .leaflet-control-zoom{ border:none !important; }
   .leaflet-control-zoom a{
@@ -47,8 +46,6 @@
     color:var(--muted) !important;
   }
   .leaflet-control-attribution a{ color:var(--sand-dim) !important; }
-
-  /* ---------- Header ---------- */
   .brand{
     position:absolute; top:20px; left:20px; z-index:1000;
     display:flex; flex-direction:column; gap:2px;
@@ -68,8 +65,6 @@
   .brand p{
     margin:2px 0 0; font-size:12.5px; color:var(--muted); max-width:280px;
   }
-
-  /* ---------- Mode toggle ---------- */
   .mode-toggle{
     position:absolute; top:22px; right:20px; z-index:1000;
     display:flex; background:var(--panel);
@@ -85,8 +80,33 @@
   .mode-toggle button.active{
     background:var(--water); color:#0d1a18;
   }
-
-  /* ---------- Basemap toggle ---------- */
+  .coord-panel{
+    position:absolute; top:20px; left:50%; transform:translateX(-50%);
+    z-index:1000; display:flex; flex-direction:column; align-items:center; gap:6px;
+  }
+  .coord-toggle{
+    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
+    background:var(--panel); border:1px solid var(--line); color:var(--muted);
+    padding:9px 16px; border-radius:999px; cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .coord-toggle:hover{ color:var(--text); }
+  .coord-form{
+    display:flex; gap:6px; align-items:center;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:8px; box-shadow:0 4px 16px rgba(0,0,0,0.08);
+  }
+  .coord-form input{
+    width:110px; font-family:'IBM Plex Mono', monospace; font-size:13px;
+    background:var(--panel-2); border:1px solid var(--line); border-radius:6px;
+    padding:7px 9px; color:var(--text);
+  }
+  .coord-form input::placeholder{ color:var(--muted); }
+  .coord-form button{
+    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
+    background:var(--water); color:#0d1a18; border:none;
+    padding:8px 14px; border-radius:6px; cursor:pointer;
+  }
   .basemap-toggle{
     position:absolute; bottom:24px; left:20px; z-index:1000;
     display:flex; background:var(--panel);
@@ -101,8 +121,6 @@
   }
   .basemap-toggle button.active{ background:var(--water); color:#0d1a18; }
   body.basemap-alt .leaflet-tile-pane{ filter:none; }
-
-  /* ---------- Hint pill ---------- */
   .hint{
     position:absolute; bottom:24px; left:50%; transform:translateX(-50%);
     z-index:1000; background:var(--panel); border:1px solid var(--line);
@@ -111,8 +129,6 @@
     transition:opacity .25s ease;
   }
   .hint .dot{ width:6px; height:6px; border-radius:50%; background:var(--water-bright); }
-
-  /* ---------- Result drawer ---------- */
   .drawer{
     position:absolute; top:0; right:0; height:100%; width:340px;
     background:var(--panel); border-left:1px solid var(--line);
@@ -150,6 +166,19 @@
   .coord-row{ display:flex; gap:14px; }
   .coord-row .stat{ flex:1; }
   .coord-row .value{ font-size:16px; font-family:'IBM Plex Mono', monospace; font-weight:400; }
+  .morph-section{ margin-top:4px; margin-bottom:18px; }
+  .morph-table{
+    background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
+    overflow:hidden;
+  }
+  .morph-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 12px; font-size:12.5px;
+    border-bottom:1px solid var(--line);
+  }
+  .morph-row:last-child{ border-bottom:none; }
+  .morph-label{ color:var(--muted); }
+  .morph-value{ font-family:'IBM Plex Mono', monospace; color:var(--text); font-weight:500; }
   .downloads{ margin-top:8px; display:flex; flex-direction:column; gap:8px; }
   .dl-btn{
     display:flex; justify-content:space-between; align-items:center;
@@ -165,8 +194,6 @@
     font-size:11.5px; color:var(--muted); line-height:1.5;
   }
   .drawer-foot a{ color:var(--sand-dim); }
-
-  /* ---------- Loading / error toast ---------- */
   .toast{
     position:absolute; bottom:70px; left:50%; transform:translateX(-50%);
     z-index:1002; background:var(--panel); border:1px solid var(--line);
@@ -182,14 +209,11 @@
     animation:spin .7s linear infinite; margin-right:8px; vertical-align:-1px;
   }
   @keyframes spin{ to{ transform:rotate(360deg); } }
-
-  /* Flowing river animation */
   .flow-line{
     stroke-dasharray: 6 7;
     animation: flow 1.1s linear infinite;
   }
   @keyframes flow{ to{ stroke-dashoffset:13; } }
-
   @media (max-width:600px){
     .brand p{ display:none; }
     .drawer{ width:100%; }
@@ -197,27 +221,30 @@
 </style>
 </head>
 <body>
-
 <div id="map"></div>
-
-<div class="brand">
-  <span class="eyebrow">Manabi &middot; منابع &middot; <span style="color:var(--danger);">Design preview — backend not connected</span></span>
-  <h1>Watersheds of <span>Saudi Arabia</span></h1>
-  <p>This is a static preview of the interface. The real version computes an upstream catchment for any point you click, using MERIT-Hydro elevation data — click anywhere to see what that experience looks like.</p>
+<div class="coord-panel" id="coord-panel">
+  <button id="coord-toggle" class="coord-toggle">📍 Go to coordinates</button>
+  <div class="coord-form" id="coord-form" style="display:none;">
+    <input type="number" id="coord-lat" placeholder="Latitude" step="any" />
+    <input type="number" id="coord-lng" placeholder="Longitude" step="any" />
+    <button id="coord-go">Go</button>
+  </div>
 </div>
-
+<div class="brand">
+  <span class="eyebrow">Manabi &middot; منابع</span>
+  <h1>Watersheds of <span>Saudi Arabia</span></h1>
+  <p>Click any point to trace its upstream catchment or downstream flow path, using MERIT-Hydro elevation data.</p>
+</div>
 <div class="mode-toggle">
   <button id="mode-up" class="active">Upstream</button>
   <button id="mode-down" title="Not implemented in this build yet" disabled style="opacity:.4;cursor:not-allowed;">Downstream</button>
 </div>
-
 <div class="hint" id="hint"><span class="dot"></span> Click the map to delineate a watershed</div>
 <div class="basemap-toggle" id="basemap-toggle">
   <button class="active" data-basemap="light">Map</button>
   <button data-basemap="satellite">Satellite</button>
 </div>
 <div class="toast" id="toast"></div>
-
 <div class="drawer" id="drawer">
   <div class="drawer-head">
     <div>
@@ -237,6 +264,10 @@
         <div class="value" id="stat-coords">—</div>
       </div>
     </div>
+    <div class="morph-section" id="morph-section" style="display:none;">
+      <div class="label" style="margin-bottom:8px;">Morphological parameters</div>
+      <div class="morph-table" id="morph-table"></div>
+    </div>
     <div class="downloads">
       <button class="dl-btn" id="dl-kml">Download for Google Earth <span class="arrow">KML ↓</span></button>
       <button class="dl-btn" id="dl-watershed">Download watershed <span class="arrow">GeoJSON ↓</span></button>
@@ -247,25 +278,24 @@
     Delineation engine: <a href="https://pypi.org/project/delineator/" target="_blank">delineator</a> (MERIT-Hydro / MERIT-Basins, megabasin 29).
   </div>
 </div>
-
 <script>
 const KSA_BOUNDS = [[12.0, 32.0], [34.0, 57.0]]; // [south,west],[north,east] — generous buffer
 const KSA_CENTER = [24.2, 45.3];
-
 const map = L.map('map', {
   zoomControl: true,
   minZoom: 4,
   maxBounds: [[8, 26], [38, 63]],
   maxBoundsViscosity: 0.6,
 }).setView(KSA_CENTER, 6);
-
 L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-const lightTiles = L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2anf_1_b33879543c02a6af4f4dcef0', {
+// CARTO free Basemaps key (no account, no expiry — see carto.com/basemaps/apikey).
+// Uses the current key-based raster endpoint; note the style path is
+// "rastertiles/voyager" now, not the old unauthenticated "light_all" path.
+const CARTO_KEY = 'cb1_2anf_1_b33879543c02a6af4f4dcef0';
+const lightTiles = L.tileLayer(`https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${CARTO_KEY}`, {
   attribution: '&copy; OpenStreetMap &copy; CARTO',
   maxZoom: 19,
 });
-  
 // Esri World Imagery — free, no API key required, no usage restrictions
 // that would block a small project like this. (Real Google Earth imagery
 // needs a paid Google Cloud API key, which isn't worth the hassle here.)
@@ -273,9 +303,7 @@ const satelliteTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/
   attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics',
   maxZoom: 19,
 });
-
 lightTiles.addTo(map);
-
 const basemaps = { light: lightTiles, satellite: satelliteTiles };
 let currentBasemap = 'light';
 document.querySelectorAll('#basemap-toggle button').forEach(btn => {
@@ -289,41 +317,65 @@ document.querySelectorAll('#basemap-toggle button').forEach(btn => {
     currentBasemap = key;
   };
 });
-
 let mode = 'up'; // 'up' or 'down'
 let resultLayer = L.layerGroup().addTo(map);
 let outletMarker = null;
 let lastWatershedGeoJSON = null;
 let lastRiversGeoJSON = null;
 let lastOutletsGeoJSON = null;
-
 const hint = document.getElementById('hint');
 const toast = document.getElementById('toast');
 const drawer = document.getElementById('drawer');
-
 document.getElementById('mode-up').onclick = () => setMode('up');
 document.getElementById('mode-down').onclick = () => setMode('down');
 document.getElementById('drawer-close').onclick = () => drawer.classList.remove('open');
-
 function setMode(m){
   mode = m;
   document.getElementById('mode-up').classList.toggle('active', m === 'up');
   document.getElementById('mode-down').classList.toggle('active', m === 'down');
 }
-
 function showToast(html, cls){
   toast.innerHTML = html;
   toast.className = 'toast show ' + (cls || '');
 }
 function hideToast(){ toast.className = 'toast'; }
-
 function fmtArea(km2){
   if (km2 == null) return '—';
   if (km2 < 1) return (km2*1e6).toFixed(0) + '<small>m²</small>';
   if (km2 > 10000) return (km2/1000).toFixed(1) + '<small>k km²</small>';
   return km2.toLocaleString(undefined, {maximumFractionDigits:1}) + '<small>km²</small>';
 }
-
+const MORPH_LABELS = {
+  perimeter_km:                 ['Perimeter', 'km'],
+  basin_length_km:              ['Basin length', 'km'],
+  form_factor:                  ['Form factor', ''],
+  circularity_ratio:            ['Circularity ratio', ''],
+  elongation_ratio:             ['Elongation ratio', ''],
+  compactness_coefficient:      ['Compactness coefficient', ''],
+  total_stream_length_km:       ['Total stream length', 'km'],
+  num_stream_segments:          ['Stream segments', ''],
+  drainage_density_km_per_km2:  ['Drainage density', 'km/km²'],
+  stream_frequency_per_km2:     ['Stream frequency', '/km²'],
+  length_of_overland_flow_km:   ['Overland flow length', 'km'],
+};
+function renderMorphology(morph){
+  const section = document.getElementById('morph-section');
+  const table = document.getElementById('morph-table');
+  if (!morph){
+    section.style.display = 'none';
+    table.innerHTML = '';
+    return;
+  }
+  table.innerHTML = Object.entries(MORPH_LABELS)
+    .filter(([key]) => morph[key] !== undefined && morph[key] !== null)
+    .map(([key, [label, unit]]) => `
+      <div class="morph-row">
+        <span class="morph-label">${label}</span>
+        <span class="morph-value">${morph[key]}${unit ? ' ' + unit : ''}</span>
+      </div>
+    `).join('');
+  section.style.display = 'block';
+}
 function download(obj, filename){
   const blob = new Blob([JSON.stringify(obj)], {type:'application/geo+json'});
   const url = URL.createObjectURL(blob);
@@ -332,7 +384,6 @@ function download(obj, filename){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
-
 function downloadText(text, filename, mime){
   const blob = new Blob([text], {type: mime});
   const url = URL.createObjectURL(blob);
@@ -341,15 +392,13 @@ function downloadText(text, filename, mime){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
-
-// ---------- GeoJSON -> KML, for opening results in Google Earth ----------
 function escapeXml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 function toKmlColor(hex, alphaHex){
   hex = hex.replace('#','');
   const r = hex.slice(0,2), g = hex.slice(2,4), b = hex.slice(4,6);
-  return (alphaHex || 'ff') + b + g + r; // KML wants aabbggrr
+  return (alphaHex || 'ff') + b + g + r;
 }
 function coordsToKmlStr(coords){
   return coords.map(c => c.slice(0,3).join(',')).join(' ');
@@ -407,7 +456,6 @@ ${placemarks}
 </Document>
 </kml>`;
 }
-
 document.getElementById('dl-kml').onclick = () => {
   if (!lastWatershedGeoJSON) return;
   const kml = buildKML(lastWatershedGeoJSON, lastRiversGeoJSON, lastOutletsGeoJSON, 'Watershed — Manabi');
@@ -419,12 +467,82 @@ document.getElementById('dl-watershed').onclick = () => {
 document.getElementById('dl-rivers').onclick = () => {
   if (lastRiversGeoJSON) download(lastRiversGeoJSON, 'rivers.geojson');
 };
-
-map.on('click', (e) => {
+async function runDelineation(lat, lng){
   hint.style.opacity = 0;
-  showToast('This is a design preview — connect the real Python backend to compute a watershed here.', 'error');
-  setTimeout(hideToast, 4500);
+  showToast('<span class="spinner"></span>Delineating watershed…', 'loading');
+  resultLayer.clearLayers();
+  if (outletMarker) { map.removeLayer(outletMarker); outletMarker = null; }
+  try {
+    const resp = await fetch('/api/delineate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ lat, lng, mode })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.error || 'Something went wrong.', 'error');
+      setTimeout(hideToast, 3500);
+      return;
+    }
+    hideToast();
+    lastWatershedGeoJSON = data.watershed;
+    lastRiversGeoJSON = data.rivers;
+    lastOutletsGeoJSON = data.outlets;
+    if (data.watershed) {
+      const wLayer = L.geoJSON(data.watershed, {
+        style: { color: '#b08d53', weight: 1.5, fillColor: '#1f7a72', fillOpacity: 0.18 }
+      }).addTo(resultLayer);
+      map.fitBounds(wLayer.getBounds(), { padding: [60, 60] });
+    }
+    if (data.rivers) {
+      L.geoJSON(data.rivers, {
+        style: { color: '#12938a', weight: 2, className: 'flow-line' }
+      }).addTo(resultLayer);
+    }
+    if (data.outlets) {
+      L.geoJSON(data.outlets, {
+        pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
+          radius: feature.properties.type === 'snapped' ? 5 : 3,
+          color: feature.properties.type === 'snapped' ? '#12938a' : '#6b5f4d',
+          fillColor: feature.properties.type === 'snapped' ? '#12938a' : '#6b5f4d',
+          fillOpacity: 0.9, weight: 1.5,
+        })
+      }).addTo(resultLayer);
+    }
+    const props = (data.watershed && data.watershed.features[0] && data.watershed.features[0].properties) || {};
+    document.getElementById('stat-area').innerHTML = fmtArea(props.area_km2);
+    document.getElementById('stat-coords').textContent =
+      (props.outlet_lat != null) ? `${props.outlet_lat}, ${props.outlet_lng}` : `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
+    document.getElementById('drawer-title').textContent =
+      mode === 'up' ? 'Upstream watershed' : 'Downstream flow path';
+    renderMorphology(data.morphology);
+    drawer.classList.add('open');
+  } catch (err) {
+    showToast('Could not reach the server.', 'error');
+    setTimeout(hideToast, 3500);
+  }
+}
+map.on('click', (e) => {
+  runDelineation(e.latlng.lat, e.latlng.lng);
 });
+const coordForm = document.getElementById('coord-form');
+document.getElementById('coord-toggle').onclick = () => {
+  coordForm.style.display = (coordForm.style.display === 'none') ? 'flex' : 'none';
+};
+function goToCoordinates(){
+  const lat = parseFloat(document.getElementById('coord-lat').value);
+  const lng = parseFloat(document.getElementById('coord-lng').value);
+  if (Number.isNaN(lat) || Number.isNaN(lng)){
+    showToast('Enter valid latitude and longitude values.', 'error');
+    setTimeout(hideToast, 3000);
+    return;
+  }
+  map.setView([lat, lng], Math.max(map.getZoom(), 9));
+  runDelineation(lat, lng);
+}
+document.getElementById('coord-go').onclick = goToCoordinates;
+document.getElementById('coord-lat').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
+document.getElementById('coord-lng').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
 </script>
 </body>
 </html>
