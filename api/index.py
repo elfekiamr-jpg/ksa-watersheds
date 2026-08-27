@@ -1,29 +1,32 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
+import urllib.request
+import json
 
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/api/delineate', methods=['POST'])
-@app.route('/delineate', methods=['POST'])
+@app.route('/api/delineate', methods=['POST', 'GET'])
+@app.route('/delineate', methods=['POST', 'GET'])
 def delineate():
+    if request.method == 'GET':
+        return jsonify({'status': 'API endpoint active. Send POST request with lat/lng.'}), 200
+
     try:
-        data = request.get_json() or {}
+        data = request.get_json(force=True, silent=True) or {}
         lat = data.get('lat')
         lng = data.get('lng')
 
         if lat is None or lng is None:
-            return jsonify({'error': 'Latitude and longitude are required.'}), 400
+            return jsonify({'error': 'Latitude and longitude parameters are required.'}), 400
 
-        # Proxy call to mghydro delineation engine
+        # Query external delineation engine directly
         external_url = f"https://mghydro.com/api/delineate?lat={lat}&lng={lng}"
-        response = requests.get(external_url, timeout=9)
+        req = urllib.request.Request(external_url, headers={'User-Agent': 'Mozilla/5.0'})
         
-        if not response.ok:
-            return jsonify({'error': 'Delineation service unavailable.'}), 502
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
 
-        res_data = response.json()
         return jsonify({
             'watershed': res_data.get('watershed'),
             'rivers': res_data.get('rivers'),
@@ -32,9 +35,10 @@ def delineate():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
 
+# Fallback route
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
-    return jsonify({'status': 'API Running'}), 200
+    return jsonify({'message': 'KSA Watersheds API active'}), 200
