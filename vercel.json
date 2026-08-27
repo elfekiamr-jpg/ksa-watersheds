@@ -1,1 +1,14 @@
-{}
+{
+  "builds": [
+    {
+      "src": "api/delineate.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "api/delineate.py"
+    }
+  ]
+}
