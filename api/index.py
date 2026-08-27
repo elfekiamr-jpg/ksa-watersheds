@@ -46,10 +46,29 @@ def delineate():
         except Exception:
             morphology = props
 
+        snapped_lat = props.get('outlet_lat', lat)
+        snapped_lng = props.get('outlet_lng', lng)
+
+        outlets_geojson = {
+            'type': 'FeatureCollection',
+            'features': [
+                {
+                    'type': 'Feature',
+                    'geometry': {'type': 'Point', 'coordinates': [float(lng), float(lat)]},
+                    'properties': {'type': 'clicked'}
+                },
+                {
+                    'type': 'Feature',
+                    'geometry': {'type': 'Point', 'coordinates': [float(snapped_lng), float(snapped_lat)]},
+                    'properties': {'type': 'snapped'}
+                }
+            ]
+        }
+
         return jsonify({
             'watershed': watershed_data,
             'rivers': rivers_data,
-            'outlets': {'lat': lat, 'lng': lng},
+            'outlets': outlets_geojson,
             'morphology': morphology
         }), 200
     except Exception as e:
