@@ -1,9 +1,15 @@
-
-import math
-import json
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import urllib.request
 import urllib.parse
+import json
+import math
 
+app = Flask(__name__)
+CORS(app)
+
+
+# ---------- morphology helpers (pure Python, no geopandas) ----------
 
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0088
@@ -92,7 +98,6 @@ def rivers_metrics(rivers_geojson):
 
 
 def get_elevations(points):
-    """points: list of (lat, lng) tuples. Returns list of elevations in meters (or None per point)."""
     locs = '|'.join(f"{lat},{lng}" for lat, lng in points)
     url = f"https://api.opentopodata.org/v1/srtm90m?locations={urllib.parse.quote(locs, safe='|,')}"
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -121,7 +126,14 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         return {}
 
     perimeter_km = polygon_perimeter_km(ring)
-    area_km2 = area_km2_hint if area_km2_hint else polygon_area_km2(ring, outlet_lat)
+
+    try:
+        area_km2 = float(area_km2_hint) if area_km2_hint else None
+    except (TypeError, ValueError):
+        area_km2 = None
+    if not area_km2:
+        area_km2 = polygon_area_km2(ring, outlet_lat)
+
     basin_length_km, far_pt = farthest_point_km(ring, outlet_lat, outlet_lng)
 
     form_factor = area_km2 / (basin_length_km ** 2) if basin_length_km > 0 else None
@@ -149,6 +161,7 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         'stream_frequency_per_km2': round(stream_frequency, 4) if stream_frequency else None,
         'length_of_overland_flow_km': round(overland_flow_length_km, 4) if overland_flow_length_km else None,
         'time_of_concentration_min': None,
+        'lag_time_min': None,
         'avg_basin_slope': None,
     }
 
@@ -157,9 +170,87 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         if len(elevations) == 2 and elevations[0] is not None and elevations[1] is not None:
             main_len_for_tc = result['main_stream_length_km'] or basin_length_km
             tc_min, slope = kirpich_tc_minutes(main_len_for_tc, elevations[1], elevations[0])
-            result['time_of_concentration_min'] = round(tc_min, 1) if tc_min else None
+            if tc_min:
+                result['time_of_concentration_min'] = round(tc_min, 1)
+                result['lag_time_min'] = round(0.6 * tc_min, 1)
             result['avg_basin_slope'] = round(slope, 5) if slope else None
     except Exception:
         pass
 
     return result
+
+
+# ---------- routes ----------
+
+@app.route('/api/delineate', methods=['POST', 'GET'])
+@app.route('/delineate', methods=['POST', 'GET'])
+def delineate():
+    if request.method == 'GET':
+        return jsonify({'status': 'API endpoint active. Send POST request with lat/lng.'}), 200
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        lat = data.get('lat')
+        lng = data.get('lng')
+        if lat is None or lng is None:
+            return jsonify({'error': 'Latitude and longitude parameters are required.'}), 400
+
+        headers = {'User-Agent': 'Mozilla/5.0'}
+
+        wshed_url = f"https://mghydro.com/app/watershed_api?lat={lat}&lng={lng}&precision=high"
+        req = urllib.request.Request(wshed_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=25) as response:
+            watershed_data = json.loads(response.read().decode('utf-8'))
+
+        rivers_data = None
+        try:
+            rivers_url = f"https://mghydro.com/app/upstream_rivers_api?lat={lat}&lng={lng}"
+            req2 = urllib.request.Request(rivers_url, headers=headers)
+            with urllib.request.urlopen(req2, timeout=25) as response2:
+                rivers_data = json.loads(response2.read().decode('utf-8'))
+        except Exception:
+            rivers_data = None
+
+        props = {}
+        if watershed_data.get('features'):
+            props = watershed_data['features'][0].get('properties', {})
+
+        area_hint = props.get('area_km2') or props.get('area')
+
+        try:
+            morphology = compute_morphology_lite(watershed_data, rivers_data, float(lat), float(lng), area_hint)
+        except Exception:
+            morphology = props
+
+        snapped_lat = props.get('outlet_lat', lat)
+        snapped_lng = props.get('outlet_lng', lng)
+
+        outlets_geojson = {
+            'type': 'FeatureCollection',
+            'features': [
+                {
+                    'type': 'Feature',
+                    'geometry': {'type': 'Point', 'coordinates': [float(lng), float(lat)]},
+                    'properties': {'type': 'clicked'}
+                },
+                {
+                    'type': 'Feature',
+                    'geometry': {'type': 'Point', 'coordinates': [float(snapped_lng), float(snapped_lat)]},
+                    'properties': {'type': 'snapped'}
+                }
+            ]
+        }
+
+        return jsonify({
+            'watershed': watershed_data,
+            'rivers': rivers_data,
+            'outlets': outlets_geojson,
+            'morphology': morphology
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    return jsonify({'message': 'KSA Watersheds API active'}), 200
