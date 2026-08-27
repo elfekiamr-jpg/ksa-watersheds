@@ -279,7 +279,11 @@
   </div>
 </div>
 <script>
-const KSA_BOUNDS = [[12.0, 32.0], [34.0, 57.0]]; // [south,west],[north,east] — generous buffer
+// OPTIONAL: Define an explicit backend API endpoint if hosted separately.
+// Leave as empty string "" to default to relative path '/api/delineate'
+window.API_BASE_URL = ""; 
+
+const KSA_BOUNDS = [[12.0, 32.0], [34.0, 57.0]]; 
 const KSA_CENTER = [24.2, 45.3];
 const map = L.map('map', {
   zoomControl: true,
@@ -288,17 +292,13 @@ const map = L.map('map', {
   maxBoundsViscosity: 0.6,
 }).setView(KSA_CENTER, 6);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
-// CARTO free Basemaps key (no account, no expiry — see carto.com/basemaps/apikey).
-// Uses the current key-based raster endpoint; note the style path is
-// "rastertiles/voyager" now, not the old unauthenticated "light_all" path.
+
 const CARTO_KEY = 'cb1_2anf_1_b33879543c02a6af4f4dcef0';
 const lightTiles = L.tileLayer(`https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${CARTO_KEY}`, {
   attribution: '&copy; OpenStreetMap &copy; CARTO',
   maxZoom: 19,
 });
-// Esri World Imagery — free, no API key required, no usage restrictions
-// that would block a small project like this. (Real Google Earth imagery
-// needs a paid Google Cloud API key, which isn't worth the hassle here.)
+
 const satelliteTiles = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
   attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics',
   maxZoom: 19,
@@ -317,7 +317,8 @@ document.querySelectorAll('#basemap-toggle button').forEach(btn => {
     currentBasemap = key;
   };
 });
-let mode = 'up'; // 'up' or 'down'
+
+let mode = 'up'; 
 let resultLayer = L.layerGroup().addTo(map);
 let outletMarker = null;
 let lastWatershedGeoJSON = null;
@@ -326,38 +327,45 @@ let lastOutletsGeoJSON = null;
 const hint = document.getElementById('hint');
 const toast = document.getElementById('toast');
 const drawer = document.getElementById('drawer');
+
 document.getElementById('mode-up').onclick = () => setMode('up');
 document.getElementById('mode-down').onclick = () => setMode('down');
 document.getElementById('drawer-close').onclick = () => drawer.classList.remove('open');
+
 function setMode(m){
   mode = m;
   document.getElementById('mode-up').classList.toggle('active', m === 'up');
   document.getElementById('mode-down').classList.toggle('active', m === 'down');
 }
+
 function showToast(html, cls){
   toast.innerHTML = html;
   toast.className = 'toast show ' + (cls || '');
 }
+
 function hideToast(){ toast.className = 'toast'; }
+
 function fmtArea(km2){
   if (km2 == null) return '—';
   if (km2 < 1) return (km2*1e6).toFixed(0) + '<small>m²</small>';
   if (km2 > 10000) return (km2/1000).toFixed(1) + '<small>k km²</small>';
   return km2.toLocaleString(undefined, {maximumFractionDigits:1}) + '<small>km²</small>';
 }
+
 const MORPH_LABELS = {
-  perimeter_km:                 ['Perimeter', 'km'],
-  basin_length_km:              ['Basin length', 'km'],
-  form_factor:                  ['Form factor', ''],
-  circularity_ratio:            ['Circularity ratio', ''],
-  elongation_ratio:             ['Elongation ratio', ''],
-  compactness_coefficient:      ['Compactness coefficient', ''],
-  total_stream_length_km:       ['Total stream length', 'km'],
-  num_stream_segments:          ['Stream segments', ''],
-  drainage_density_km_per_km2:  ['Drainage density', 'km/km²'],
-  stream_frequency_per_km2:     ['Stream frequency', '/km²'],
-  length_of_overland_flow_km:   ['Overland flow length', 'km'],
+  perimeter_km:                ['Perimeter', 'km'],
+  basin_length_km:             ['Basin length', 'km'],
+  form_factor:                 ['Form factor', ''],
+  circularity_ratio:           ['Circularity ratio', ''],
+  elongation_ratio:            ['Elongation ratio', ''],
+  compactness_coefficient:     ['Compactness coefficient', ''],
+  total_stream_length_km:      ['Total stream length', 'km'],
+  num_stream_segments:         ['Stream segments', ''],
+  drainage_density_km_per_km2: ['Drainage density', 'km/km²'],
+  stream_frequency_per_km2:    ['Stream frequency', '/km²'],
+  length_of_overland_flow_km:  ['Overland flow length', 'km'],
 };
+
 function renderMorphology(morph){
   const section = document.getElementById('morph-section');
   const table = document.getElementById('morph-table');
@@ -376,6 +384,7 @@ function renderMorphology(morph){
     `).join('');
   section.style.display = 'block';
 }
+
 function download(obj, filename){
   const blob = new Blob([JSON.stringify(obj)], {type:'application/geo+json'});
   const url = URL.createObjectURL(blob);
@@ -384,6 +393,7 @@ function download(obj, filename){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
+
 function downloadText(text, filename, mime){
   const blob = new Blob([text], {type: mime});
   const url = URL.createObjectURL(blob);
@@ -392,17 +402,21 @@ function downloadText(text, filename, mime){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
+
 function escapeXml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
 function toKmlColor(hex, alphaHex){
   hex = hex.replace('#','');
   const r = hex.slice(0,2), g = hex.slice(2,4), b = hex.slice(4,6);
   return (alphaHex || 'ff') + b + g + r;
 }
+
 function coordsToKmlStr(coords){
   return coords.map(c => c.slice(0,3).join(',')).join(' ');
 }
+
 function polygonToKmlGeom(coordinates){
   const outer = coordinates[0];
   let inner = '';
@@ -411,6 +425,7 @@ function polygonToKmlGeom(coordinates){
   }
   return `<Polygon><outerBoundaryIs><LinearRing><coordinates>${coordsToKmlStr(outer)}</coordinates></LinearRing></outerBoundaryIs>${inner}</Polygon>`;
 }
+
 function geometryToKml(geom){
   if (!geom) return '';
   switch (geom.type){
@@ -423,6 +438,7 @@ function geometryToKml(geom){
     default: return '';
   }
 }
+
 function buildKML(watershedGJ, riversGJ, outletsGJ, title){
   let placemarks = '';
   (watershedGJ && watershedGJ.features || []).forEach(f => {
@@ -456,6 +472,7 @@ ${placemarks}
 </Document>
 </kml>`;
 }
+
 document.getElementById('dl-kml').onclick = () => {
   if (!lastWatershedGeoJSON) return;
   const kml = buildKML(lastWatershedGeoJSON, lastRiversGeoJSON, lastOutletsGeoJSON, 'Watershed — Manabi');
@@ -467,27 +484,35 @@ document.getElementById('dl-watershed').onclick = () => {
 document.getElementById('dl-rivers').onclick = () => {
   if (lastRiversGeoJSON) download(lastRiversGeoJSON, 'rivers.geojson');
 };
+
 async function runDelineation(lat, lng){
   hint.style.opacity = 0;
   showToast('<span class="spinner"></span>Delineating watershed…', 'loading');
   resultLayer.clearLayers();
   if (outletMarker) { map.removeLayer(outletMarker); outletMarker = null; }
+  
+  // Resolves to window.API_BASE_URL + '/api/delineate' or fallback to relative '/api/delineate'
+  const endpoint = (window.API_BASE_URL || '') + '/api/delineate';
+  
   try {
-    const resp = await fetch('/api/delineate', {
+    const resp = await fetch(endpoint, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ lat, lng, mode })
     });
+    
     const data = await resp.json();
     if (!resp.ok) {
-      showToast(data.error || 'Something went wrong.', 'error');
+      showToast(data.error || 'API execution failed.', 'error');
       setTimeout(hideToast, 3500);
       return;
     }
+    
     hideToast();
     lastWatershedGeoJSON = data.watershed;
     lastRiversGeoJSON = data.rivers;
     lastOutletsGeoJSON = data.outlets;
+    
     if (data.watershed) {
       const wLayer = L.geoJSON(data.watershed, {
         style: { color: '#b08d53', weight: 1.5, fillColor: '#1f7a72', fillOpacity: 0.18 }
@@ -509,6 +534,7 @@ async function runDelineation(lat, lng){
         })
       }).addTo(resultLayer);
     }
+    
     const props = (data.watershed && data.watershed.features[0] && data.watershed.features[0].properties) || {};
     document.getElementById('stat-area').innerHTML = fmtArea(props.area_km2);
     document.getElementById('stat-coords').textContent =
@@ -518,17 +544,20 @@ async function runDelineation(lat, lng){
     renderMorphology(data.morphology);
     drawer.classList.add('open');
   } catch (err) {
-    showToast('Could not reach the server.', 'error');
-    setTimeout(hideToast, 3500);
+    showToast('Could not reach backend API endpoint. Verify API URL or server status.', 'error');
+    setTimeout(hideToast, 4000);
   }
 }
+
 map.on('click', (e) => {
   runDelineation(e.latlng.lat, e.latlng.lng);
 });
+
 const coordForm = document.getElementById('coord-form');
 document.getElementById('coord-toggle').onclick = () => {
   coordForm.style.display = (coordForm.style.display === 'none') ? 'flex' : 'none';
 };
+
 function goToCoordinates(){
   const lat = parseFloat(document.getElementById('coord-lat').value);
   const lng = parseFloat(document.getElementById('coord-lng').value);
@@ -540,6 +569,7 @@ function goToCoordinates(){
   map.setView([lat, lng], Math.max(map.getZoom(), 9));
   runDelineation(lat, lng);
 }
+
 document.getElementById('coord-go').onclick = goToCoordinates;
 document.getElementById('coord-lat').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
 document.getElementById('coord-lng').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToCoordinates(); });
