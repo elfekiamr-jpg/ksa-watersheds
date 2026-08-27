@@ -161,6 +161,7 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         'stream_frequency_per_km2': round(stream_frequency, 4) if stream_frequency else None,
         'length_of_overland_flow_km': round(overland_flow_length_km, 4) if overland_flow_length_km else None,
         'time_of_concentration_min': None,
+        'lag_time_min': None,
         'avg_basin_slope': None,
     }
 
@@ -169,7 +170,9 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
         if len(elevations) == 2 and elevations[0] is not None and elevations[1] is not None:
             main_len_for_tc = result['main_stream_length_km'] or basin_length_km
             tc_min, slope = kirpich_tc_minutes(main_len_for_tc, elevations[1], elevations[0])
-            result['time_of_concentration_min'] = round(tc_min, 1) if tc_min else None
+            if tc_min:
+                result['time_of_concentration_min'] = round(tc_min, 1)
+                result['lag_time_min'] = round(0.6 * tc_min, 1)
             result['avg_basin_slope'] = round(slope, 5) if slope else None
     except Exception:
         pass
