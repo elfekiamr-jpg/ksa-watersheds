@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import urllib.request
 import json
+from morphology_lite import compute_morphology_lite
 
 app = Flask(__name__)
 CORS(app)
@@ -38,11 +39,18 @@ def delineate():
         if watershed_data.get('features'):
             props = watershed_data['features'][0].get('properties', {})
 
+        area_hint = props.get('area_km2') or props.get('area')
+
+        try:
+            morphology = compute_morphology_lite(watershed_data, rivers_data, float(lat), float(lng), area_hint)
+        except Exception:
+            morphology = props
+
         return jsonify({
             'watershed': watershed_data,
             'rivers': rivers_data,
             'outlets': {'lat': lat, 'lng': lng},
-            'morphology': props
+            'morphology': morphology
         }), 200
     except Exception as e:
         return jsonify({'error': f'Server error: {str(e)}'}), 500
