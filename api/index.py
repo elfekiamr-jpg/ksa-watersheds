@@ -530,7 +530,7 @@ ENV_LABELS = [
 ]
 
 
-def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None):
+def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None, cn_info=None):
     """Builds the PDF entirely with reportlab vector drawing (no external map-tile/image
     dependency, so it stays reliable on Vercel's serverless Python runtime)."""
     from reportlab.lib.pagesizes import A4
@@ -754,7 +754,89 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
             c.setFillColor(colors.HexColor('#333333'))
         c.drawString(x, y, line)
         y -= 3.6 * mm
-    y -= 6 * mm
+    y -= 8 * mm
+
+    # ---- Composite curve number (SCS/NRCS method) ----
+    if y < margin + 40 * mm:
+        c.showPage()
+        y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Composite curve number (SCS/NRCS method)')
+    y -= 7 * mm
+
+    if cn_info and cn_info.get('composite_cn') is not None:
+        cn_val = cn_info['composite_cn']
+        n_valid = cn_info.get('n_valid', 0)
+        n_sampled = cn_info.get('n_sampled', 0)
+        c.setFillColor(TEAL_DARK)
+        c.setFont('Helvetica-Bold', 22)
+        c.drawString(x, y - 5 * mm, f'CN = {cn_val:.0f}')
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 8.5)
+        c.drawString(x + 40 * mm, y - 3.5 * mm,
+                     f'Area-weighted across {n_valid} of {n_sampled} sampled points inside the watershed boundary,')
+        c.drawString(x + 40 * mm, y - 7.5 * mm,
+                     'each classified by land cover and hydrologic soil group, per TR-55.')
+        y -= 15 * mm
+
+        breakdown = cn_info.get('breakdown') or []
+        if breakdown:
+            col_a, col_b, col_c, col_d = x, x + 62 * mm, x + 90 * mm, x + 118 * mm
+            c.setFont('Helvetica-Bold', 8.5)
+            c.setFillColor(GREY)
+            c.drawString(col_a, y, 'Land cover')
+            c.drawString(col_b, y, 'Soil group')
+            c.drawString(col_c, y, 'Area share')
+            c.drawString(col_d, y, 'CN')
+            y -= 3 * mm
+            c.setStrokeColor(colors.HexColor('#cccccc'))
+            c.line(x, y, page_w - margin, y)
+            y -= 5 * mm
+            c.setFont('Helvetica', 8.5)
+            row_i = 0
+            for row in breakdown:
+                if y < margin + 10 * mm:
+                    c.showPage()
+                    y = page_h - margin
+                    c.setFont('Helvetica', 8.5)
+                if row_i % 2 == 0:
+                    c.setFillColor(colors.HexColor('#f9f8f5'))
+                    c.rect(x, y - 1.5 * mm, page_w - 2 * margin, 6 * mm, fill=1, stroke=0)
+                c.setFillColor(colors.black)
+                c.drawString(col_a + 1 * mm, y, row['landcover'])
+                c.drawString(col_b, y, row['hsg'])
+                c.drawString(col_c, y, f"{row['pct']:.0f}%")
+                c.drawString(col_d, y, str(row['cn']))
+                y -= 6 * mm
+                row_i += 1
+            y -= 3 * mm
+    else:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawString(x, y, 'NA — could not sample enough classified points across the watershed to compute a composite CN.')
+        y -= 10 * mm
+
+    cn_note = (
+        'Curve numbers assume "good" hydrologic condition and average antecedent moisture (AMC II), per TR-55 Table 2-2. '
+        'Land-cover classes are crosswalked to the nearest standard TR-55 cover type (see the note above); Built area uses a '
+        'generic residential (~38% impervious) proxy since remote sensing does not indicate density. Water and Snow/Ice/Clouds '
+        'pixels are excluded from, or fixed in, the weighting as noted above. This is a grid-sample estimate, not a full zonal-'
+        'statistics computation over the exact watershed polygon — treat it as indicative, and verify against site-specific '
+        'soil survey and land-use data before using it in design calculations.'
+    )
+    c.setFont('Helvetica-Oblique', 7)
+    c.setFillColor(GREY)
+    cn_note_lines = simpleSplit(cn_note, 'Helvetica-Oblique', 7, map_w)
+    for line in cn_note_lines:
+        if y < margin + 8 * mm:
+            c.showPage()
+            y = page_h - margin
+            c.setFont('Helvetica-Oblique', 7)
+            c.setFillColor(GREY)
+        c.drawString(x, y, line)
+        y -= 3.4 * mm
+    y -= 8 * mm
 
     # ---- Morphology table ----
     if y < 60 * mm:
@@ -995,6 +1077,145 @@ def _compute_watershed_bbox(watershed_geojson, pad_frac=0.0):
         min_lat -= lat_pad
         max_lat += lat_pad
     return min_lon, max_lon, min_lat, max_lat
+
+
+def _point_in_ring(lon, lat, ring):
+    """Standard ray-casting point-in-polygon test against a single ring."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-15) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_watershed(lon, lat, watershed_geojson):
+    """True if (lon, lat) falls inside the watershed polygon(s). Rings within
+    one feature are combined with the even-odd rule (so holes are respected);
+    features are OR'd together (for a MultiPolygon-as-features case)."""
+    for feat in (watershed_geojson or {}).get('features', []):
+        rings = _all_ring_coords(feat.get('geometry') or {})
+        if not rings:
+            continue
+        inside = False
+        for ring in rings:
+            if len(ring) >= 3 and _point_in_ring(lon, lat, ring):
+                inside = not inside
+        if inside:
+            return True
+    return False
+
+
+# SCS/NRCS curve numbers (average antecedent moisture, "good" hydrologic
+# condition) by hydrologic soil group A-D, from TR-55 Table 2-2, crosswalked
+# from this app's Sentinel-2 land-cover classes onto the nearest standard
+# TR-55 cover type. This is necessarily an approximation — remote-sensing
+# land cover doesn't carry TR-55's treatment/condition detail — documented
+# assumptions:
+#   Trees              -> "Woods, good condition"
+#   Rangeland          -> "Pasture/grassland/range, good condition"
+#   Crops              -> "Row crops, straight row, good condition"
+#   Built area         -> "Residential, 1/4-acre lot (~38% impervious)" as a
+#                          general-purpose proxy (remote sensing doesn't
+#                          distinguish density/imperviousness)
+#   Bare ground        -> "Fallow, bare soil"
+#   Water              -> CN 98 (conventional: negligible infiltration)
+#   Flooded vegetation -> CN 95 (wetland proxy — not a standard TR-55 class)
+# Snow/Ice and Clouds are excluded from the composite (not real ground cover).
+CN_TABLE = {
+    'Trees':              {'A': 30, 'B': 55, 'C': 70, 'D': 77},
+    'Rangeland':          {'A': 39, 'B': 61, 'C': 74, 'D': 80},
+    'Crops':              {'A': 67, 'B': 78, 'C': 85, 'D': 89},
+    'Built area':         {'A': 61, 'B': 75, 'C': 83, 'D': 87},
+    'Bare ground':        {'A': 77, 'B': 86, 'C': 91, 'D': 94},
+    'Water':              {'A': 98, 'B': 98, 'C': 98, 'D': 98},
+    'Flooded vegetation': {'A': 95, 'B': 95, 'C': 95, 'D': 95},
+}
+CN_EXCLUDED_LANDCOVER = {'Snow / ice', 'Clouds'}
+
+
+def compute_composite_cn(watershed_geojson, target_points=25):
+    """Area-weighted composite SCS/NRCS curve number for the whole watershed:
+    samples a grid of points inside the polygon, classifies each by land
+    cover + hydrologic soil group (the same point APIs used for the outlet
+    row elsewhere in this report), looks up CN per TR-55, and averages
+    weighted by how many sample points fall in each land-cover/HSG pair —
+    which approximates area weighting for a reasonably dense, even grid.
+    Returns None on total failure; otherwise a dict with 'composite_cn'
+    (None if no point could be classified), 'n_sampled', 'n_valid', and a
+    'breakdown' list of the contributing land-cover/HSG pairs."""
+    try:
+        min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson)
+    except Exception:
+        return None
+
+    # Oversample a regular grid across the bbox, then keep only points that
+    # actually fall inside the (possibly irregular/concave) watershed shape.
+    grid_n = 10
+    candidates = []
+    for i in range(grid_n):
+        for j in range(grid_n):
+            lon = min_lon + (max_lon - min_lon) * (i + 0.5) / grid_n
+            lat = min_lat + (max_lat - min_lat) * (j + 0.5) / grid_n
+            if _point_in_watershed(lon, lat, watershed_geojson):
+                candidates.append((lat, lon))
+    if not candidates:
+        return None
+    if len(candidates) > target_points:
+        step = len(candidates) / target_points
+        candidates = [candidates[int(i * step)] for i in range(target_points)]
+
+    def sample(pt):
+        lat, lon = pt
+        try:
+            lc = fetch_landcover_point_class(lat, lon)
+        except Exception:
+            lc = None
+        try:
+            hsg = fetch_hsg_point_class(lat, lon)
+        except Exception:
+            hsg = None
+        return (lc, hsg)
+
+    results = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+            futures = [ex.submit(sample, pt) for pt in candidates]
+            for f in futures:
+                try:
+                    results.append(f.result(timeout=12))
+                except Exception:
+                    results.append((None, None))
+    except Exception:
+        return None
+
+    counts = {}
+    total_valid = 0
+    for lc, hsg in results:
+        if not lc or not hsg or lc in CN_EXCLUDED_LANDCOVER:
+            continue
+        cn_row = CN_TABLE.get(lc)
+        if not cn_row or hsg not in cn_row:
+            continue
+        key = (lc, hsg)
+        counts[key] = counts.get(key, 0) + 1
+        total_valid += 1
+
+    if total_valid == 0:
+        return {'composite_cn': None, 'n_sampled': len(candidates), 'n_valid': 0, 'breakdown': []}
+
+    weighted_sum = sum(CN_TABLE[lc][hsg] * n for (lc, hsg), n in counts.items())
+    composite = weighted_sum / total_valid
+    breakdown = sorted(
+        [{'landcover': lc, 'hsg': hsg, 'count': n, 'pct': 100.0 * n / total_valid, 'cn': CN_TABLE[lc][hsg]}
+         for (lc, hsg), n in counts.items()],
+        key=lambda r: -r['count']
+    )
+    return {'composite_cn': composite, 'n_sampled': len(candidates), 'n_valid': total_valid, 'breakdown': breakdown}
 
 
 def _draw_overlay(c, watershed_geojson, rivers_geojson, outlets_geojson, transform, teal, teal_dark, gold, fill_alpha=0.22):
@@ -1629,9 +1850,10 @@ def report():
         # Run the geocoding lookup and the environmental-data lookups concurrently —
         # they're independent, unrelated web requests, so there's no reason to
         # wait on one before starting the others.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             f_geo = ex.submit(reverse_geocode, lat, lng)
             f_env = ex.submit(fetch_environmental_context, lat, lng)
+            f_cn = ex.submit(compute_composite_cn, watershed_geojson)
             try:
                 geo_info = f_geo.result(timeout=15)
             except Exception:
@@ -1640,12 +1862,16 @@ def report():
                 env_info = f_env.result(timeout=25)
             except Exception:
                 env_info = {}
+            try:
+                cn_info = f_cn.result(timeout=25)
+            except Exception:
+                cn_info = None
 
         wiki_title = geo_info.get('place') or geo_info.get('region')
         wiki_info = wikipedia_summary(wiki_title)
 
         pdf_bytes = build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson,
-                                      morphology, geo_info, wiki_info, env_info)
+                                      morphology, geo_info, wiki_info, env_info, cn_info)
 
         filename = f"manabi_watershed_report_{lat:.4f}_{lng:.4f}.pdf"
         return Response(
