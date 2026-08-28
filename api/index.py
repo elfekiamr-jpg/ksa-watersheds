@@ -456,15 +456,18 @@ def fetch_environmental_context(lat, lng):
         'wind_direction_compass': None,
         'land_use': None,
         'population': None,
+        'landcover_class': None,   # ESA WorldCover class at the outlet point
+        'soil_class': None,        # ISRIC SoilGrids WRB dominant class at the outlet point
         'monthly': None,           # {'months','rainfall_mm','et0_mm','wind_speed_kmh','wind_direction_compass'}
         'monthly_humidity': None,  # {'months','humidity_pct'}
     }
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
             f_weather = ex.submit(fetch_current_weather, lat, lng)
             f_climate = ex.submit(fetch_annual_climate, lat, lng)
             f_land = ex.submit(fetch_land_use_population, lat, lng)
             f_humidity = ex.submit(fetch_monthly_humidity, lat, lng)
+            f_lcsoil = ex.submit(fetch_landcover_soil_labels, lat, lng)
             for f in (f_weather, f_climate, f_land):
                 try:
                     result.update(f.result(timeout=20) or {})
@@ -474,6 +477,12 @@ def fetch_environmental_context(lat, lng):
                 result['monthly_humidity'] = f_humidity.result(timeout=20)
             except Exception:
                 result['monthly_humidity'] = None
+            try:
+                lcsoil = f_lcsoil.result(timeout=15) or {}
+                result['landcover_class'] = lcsoil.get('landcover')
+                result['soil_class'] = lcsoil.get('soil')
+            except Exception:
+                pass
     except Exception:
         pass
     return result
@@ -504,7 +513,9 @@ ENV_LABELS = [
     ('Reference evapotranspiration — ET0 (trailing 12 months)', 'mm/yr', 'et0_annual_mm', None),
     ('Open-water / pan evaporation', 'mm/yr', None, 'not available from a free public API for an arbitrary point'),
     ('Runoff', '', None, 'no free public point-query API available'),
-    ('Land use / land cover (at outlet point)', '', 'land_use', None),
+    ('Land use / land cover (OSM tag, at outlet point)', '', 'land_use', None),
+    ('Land cover class (ESA WorldCover, at outlet point)', '', 'landcover_class', None),
+    ('Dominant soil type (ISRIC SoilGrids WRB, at outlet point)', '', 'soil_class', None),
     ('Population (nearest named place, if on record)', 'people', 'population', None),
     ('Relative humidity (current)', '%', 'relative_humidity_pct', None),
     ('Wind speed (current)', 'km/h', 'wind_speed_kmh', None),
@@ -634,6 +645,55 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     c.drawString(x, map_top2 - map_h - 5 * mm, 'Map 2 — watershed over satellite imagery (Esri World Imagery) — same legend as Map 1.')
     y = map_top2 - map_h - 12 * mm
 
+    # ---- Map 3: land cover (ESA WorldCover) ----
+    c.showPage()
+    y = page_h - margin
+    map_top3 = y
+    c.setStrokeColor(colors.HexColor('#dddddd'))
+    c.setFillColor(colors.HexColor('#f6f4ef'))
+    c.rect(x, map_top3 - map_h, map_w, map_h, fill=1, stroke=1)
+    legend_bottom = None
+    try:
+        bbox3 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
+                                       x, map_top3 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
+                                       fetch_landcover_image_bytes)
+        _draw_extent_labels(c, *bbox3, x, map_top3 - map_h, map_w, map_h)
+    except Exception:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawCentredString(x + map_w / 2, map_top3 - map_h / 2, 'Land cover layer unavailable')
+
+    c.setFillColor(GREY)
+    c.setFont('Helvetica-Oblique', 7)
+    c.drawString(x, map_top3 - map_h - 5 * mm, 'Map 3 — land cover (ESA WorldCover 2021, 10m resolution) — watershed boundary outlined in teal.')
+    y = map_top3 - map_h - 9 * mm
+    legend_bottom = _draw_landcover_legend(c, x, y, map_w)
+    y = legend_bottom - 10 * mm
+
+    # ---- Map 4: soil type (ISRIC SoilGrids WRB) ----
+    if y < margin + map_h + 12 * mm:
+        c.showPage()
+        y = page_h - margin
+    map_top4 = y
+    c.setStrokeColor(colors.HexColor('#dddddd'))
+    c.setFillColor(colors.HexColor('#f6f4ef'))
+    c.rect(x, map_top4 - map_h, map_w, map_h, fill=1, stroke=1)
+    try:
+        bbox4 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
+                                       x, map_top4 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
+                                       fetch_soil_image_bytes)
+        _draw_extent_labels(c, *bbox4, x, map_top4 - map_h, map_w, map_h)
+    except Exception:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawCentredString(x + map_w / 2, map_top4 - map_h / 2, 'Soil type layer unavailable')
+
+    c.setFillColor(GREY)
+    c.setFont('Helvetica-Oblique', 7)
+    c.drawString(x, map_top4 - map_h - 5 * mm, 'Map 4 — dominant soil type, World Reference Base classification (ISRIC SoilGrids, 250m resolution).')
+    c.drawString(x, map_top4 - map_h - 9.5 * mm, 'Color key varies by soil class; the dominant class at the outlet point is listed in the table below.')
+    y = map_top4 - map_h - 16 * mm
+
     # ---- Morphology table ----
     if y < 60 * mm:
         c.showPage()
@@ -728,7 +788,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     c.setFillColor(GREY)
     c.setFont('Helvetica-Oblique', 7)
     c.drawString(x, y - 1 * mm,
-                 'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged.')
+                 'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged; '
+                 'ESA WorldCover for land cover class; ISRIC SoilGrids for dominant soil type.')
     y -= 8 * mm
 
     # ---- Monthly climate averages (multi-year calendar-month normals) ----
@@ -951,6 +1012,154 @@ def fetch_satellite_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900
             return resp.read()
     except Exception:
         return None
+
+
+def fetch_wms_image_bytes(base_url, layer, min_lon, max_lon, min_lat, max_lat, width_px=900, styles=''):
+    """Generic OGC WMS 1.1.1 GetMap fetch (lon/lat = EPSG:4326, axis order lon,lat
+    for CRS via SRS param). Returns raw PNG bytes or None on any failure."""
+    try:
+        lon_range = max(max_lon - min_lon, 1e-6)
+        lat_range = max(max_lat - min_lat, 1e-6)
+        aspect = lon_range / lat_range
+        height_px = int(round(width_px / aspect)) if aspect > 0 else width_px
+        height_px = max(300, min(height_px, 1400))
+        params = {
+            'SERVICE': 'WMS', 'VERSION': '1.1.1', 'REQUEST': 'GetMap',
+            'LAYERS': layer, 'STYLES': styles, 'SRS': 'EPSG:4326',
+            'BBOX': f'{min_lon},{min_lat},{max_lon},{max_lat}',
+            'WIDTH': str(width_px), 'HEIGHT': str(height_px),
+            'FORMAT': 'image/png', 'TRANSPARENT': 'TRUE',
+        }
+        url = base_url + ('&' if '?' in base_url else '?') + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0 (contact: elfekiamr@gmail.com)'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def fetch_landcover_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900):
+    return fetch_wms_image_bytes('https://titiler.terrascope.be/wms', 'WORLDCOVER_2021_MAP',
+                                  min_lon, max_lon, min_lat, max_lat, width_px)
+
+
+def fetch_soil_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900):
+    return fetch_wms_image_bytes('https://maps.isric.org/mapserv?map=/map/wrb.map', 'MostProbable',
+                                  min_lon, max_lon, min_lat, max_lat, width_px)
+
+
+def fetch_wms_point_info(base_url, layer, lon, lat, delta=0.02):
+    """GetFeatureInfo point query for a single-pixel WMS bbox centered on
+    (lon, lat). Returns the parsed value as text, or None on any failure."""
+    try:
+        min_lon, max_lon = lon - delta, lon + delta
+        min_lat, max_lat = lat - delta, lat + delta
+        params = {
+            'SERVICE': 'WMS', 'VERSION': '1.1.1', 'REQUEST': 'GetFeatureInfo',
+            'LAYERS': layer, 'QUERY_LAYERS': layer, 'STYLES': '', 'SRS': 'EPSG:4326',
+            'BBOX': f'{min_lon},{min_lat},{max_lon},{max_lat}',
+            'WIDTH': '101', 'HEIGHT': '101', 'X': '50', 'Y': '50',
+            'INFO_FORMAT': 'text/plain', 'FEATURE_COUNT': '1',
+        }
+        url = base_url + ('&' if '?' in base_url else '?') + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0 (contact: elfekiamr@gmail.com)'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read().decode('utf-8', errors='ignore').strip()
+        if not text or 'no feature' in text.lower() or 'exception' in text.lower():
+            return None
+        return text
+    except Exception:
+        return None
+
+
+_LANDCOVER_CLASS_NAMES = {
+    10: 'Tree cover', 20: 'Shrubland', 30: 'Grassland', 40: 'Cropland',
+    50: 'Built-up', 60: 'Bare / sparse vegetation', 70: 'Snow and ice',
+    80: 'Permanent water bodies', 90: 'Herbaceous wetland', 95: 'Mangroves',
+    100: 'Moss and lichen',
+}
+
+
+def fetch_landcover_soil_labels(lat, lng):
+    """Best-effort point classification for the outlet: ESA WorldCover class
+    name and ISRIC dominant soil group, via WMS GetFeatureInfo. Returns a
+    dict with 'landcover' / 'soil' keys (each may be None)."""
+    out = {'landcover': None, 'soil': None}
+    try:
+        lc_text = fetch_wms_point_info('https://titiler.terrascope.be/wms', 'WORLDCOVER_2021_MAP', lng, lat)
+        if lc_text:
+            import re
+            m = re.search(r'(\d{1,3})', lc_text)
+            if m:
+                code = int(m.group(1))
+                out['landcover'] = _LANDCOVER_CLASS_NAMES.get(code, lc_text[:60])
+            else:
+                out['landcover'] = lc_text[:60]
+    except Exception:
+        pass
+    try:
+        soil_text = fetch_wms_point_info('https://maps.isric.org/mapserv?map=/map/wrb.map', 'MostProbable', lng, lat)
+        if soil_text:
+            for line in soil_text.splitlines():
+                line = line.strip()
+                if line and ':' in line:
+                    out['soil'] = line.split(':', 1)[1].strip()[:60]
+                    break
+            if not out['soil'] and soil_text:
+                out['soil'] = soil_text[:60]
+    except Exception:
+        pass
+    return out
+
+
+def _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h,
+                           teal, teal_dark, gold, fetch_fn):
+    """Watershed overlay drawn on top of a fetched WMS raster (land cover or
+    soil type). Raises on any failure so the caller can show a fallback."""
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib import colors
+
+    min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson, pad_frac=0.18)
+    img_bytes = fetch_fn(min_lon, max_lon, min_lat, max_lat, width_px=900)
+    if not img_bytes:
+        raise ValueError('layer imagery unavailable')
+
+    # Light basemap fill first, since the WMS layer is semi-opaque but not full-bleed.
+    c.setFillColor(colors.HexColor('#eeeeee'))
+    c.rect(x0, y0, w, h, fill=1, stroke=0)
+
+    img = ImageReader(io.BytesIO(img_bytes))
+    c.drawImage(img, x0, y0, width=w, height=h, preserveAspectRatio=False, mask='auto')
+
+    transform = _project_factory(min_lon, max_lon, min_lat, max_lat, x0, y0, w, h, pad=0)
+    _draw_overlay(c, watershed_geojson, rivers_geojson, outlets_geojson, transform, teal, teal_dark, gold, fill_alpha=0.0)
+    return (min_lon, max_lon, min_lat, max_lat)
+
+
+def _draw_landcover_legend(c, x0, y0, w):
+    """Compact ESA WorldCover legend strip drawn under a land-cover map."""
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    entries = [
+        ('#006400', 'Tree cover'), ('#ffbb22', 'Shrubland'), ('#ffff4c', 'Grassland'),
+        ('#f096ff', 'Cropland'), ('#fa0000', 'Built-up'), ('#b4b4b4', 'Bare/sparse'),
+        ('#0064c8', 'Water'), ('#0096a0', 'Wetland'), ('#00cf75', 'Mangroves'),
+    ]
+    sw = 3.2 * mm
+    fx = x0
+    fy = y0
+    c.setFont('Helvetica', 6.8)
+    for hexcol, label in entries:
+        tw = c.stringWidth(label, 'Helvetica', 6.8)
+        if fx + sw + tw + 5 * mm > x0 + w:
+            fx = x0
+            fy -= 4.6 * mm
+        c.setFillColor(colors.HexColor(hexcol))
+        c.rect(fx, fy, sw, sw, fill=1, stroke=0)
+        c.setFillColor(colors.HexColor('#333333'))
+        c.drawString(fx + sw + 1 * mm, fy, label)
+        fx += sw + tw + 6 * mm
+    return fy
 
 
 def _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
