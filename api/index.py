@@ -332,8 +332,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
 
     y -= 4 * mm
 
-    # ---- Watershed map (vector-drawn, no basemap tiles) ----
-    map_h = 85 * mm
+    # ---- Map 1: schematic vector outline (no basemap tiles) ----
+    map_h = 78 * mm
     map_w = page_w - 2 * margin
     map_top = y
     c.setStrokeColor(colors.HexColor('#dddddd'))
@@ -341,8 +341,9 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     c.rect(x, map_top - map_h, map_w, map_h, fill=1, stroke=1)
 
     try:
-        _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson,
-                                x, map_top - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD)
+        bbox1 = _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson,
+                                        x, map_top - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD)
+        _draw_extent_labels(c, *bbox1, x, map_top - map_h, map_w, map_h)
     except Exception:
         c.setFillColor(GREY)
         c.setFont('Helvetica', 9)
@@ -350,8 +351,31 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
 
     c.setFillColor(GREY)
     c.setFont('Helvetica-Oblique', 7)
-    c.drawString(x, map_top - map_h - 5 * mm, 'Schematic vector outline (not to scale with a basemap) — teal fill: watershed boundary, teal line: river network, gold dot: outlet.')
+    c.drawString(x, map_top - map_h - 5 * mm, 'Map 1 — schematic outline (not to scale) — teal fill: watershed boundary, teal line: river network, gold dot: outlet.')
     y = map_top - map_h - 12 * mm
+
+    # ---- Map 2: watershed over satellite imagery ----
+    if y < margin + map_h + 12 * mm:
+        c.showPage()
+        y = page_h - margin
+    map_top2 = y
+    c.setStrokeColor(colors.HexColor('#dddddd'))
+    c.setFillColor(colors.HexColor('#f6f4ef'))
+    c.rect(x, map_top2 - map_h, map_w, map_h, fill=1, stroke=1)
+
+    try:
+        bbox2 = _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
+                                     x, map_top2 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD)
+        _draw_extent_labels(c, *bbox2, x, map_top2 - map_h, map_w, map_h)
+    except Exception:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawCentredString(x + map_w / 2, map_top2 - map_h / 2, 'Satellite imagery unavailable')
+
+    c.setFillColor(GREY)
+    c.setFont('Helvetica-Oblique', 7)
+    c.drawString(x, map_top2 - map_h - 5 * mm, 'Map 2 — watershed over satellite imagery (Esri World Imagery) — same legend as Map 1.')
+    y = map_top2 - map_h - 12 * mm
 
     # ---- Morphology table ----
     if y < 60 * mm:
@@ -439,9 +463,9 @@ def _all_line_coords(geometry):
     return []
 
 
-def _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
-    from reportlab.lib import colors as rl_colors
-
+def _compute_watershed_bbox(watershed_geojson, pad_frac=0.0):
+    """Returns (min_lon, max_lon, min_lat, max_lat), optionally padded by a fraction
+    of the extent on each side. Raises ValueError if there is no usable geometry."""
     min_lon, max_lon, min_lat, max_lat = 180.0, -180.0, 90.0, -90.0
     found = False
     for feat in (watershed_geojson or {}).get('features', []):
@@ -453,11 +477,24 @@ def _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson
                 found = True
     if not found:
         raise ValueError('no watershed geometry to draw')
+    if pad_frac:
+        lon_pad = max((max_lon - min_lon) * pad_frac, 0.005)
+        lat_pad = max((max_lat - min_lat) * pad_frac, 0.005)
+        min_lon -= lon_pad
+        max_lon += lon_pad
+        min_lat -= lat_pad
+        max_lat += lat_pad
+    return min_lon, max_lon, min_lat, max_lat
 
-    transform = _project_factory(min_lon, max_lon, min_lat, max_lat, x0, y0, w, h)
+
+def _draw_overlay(c, watershed_geojson, rivers_geojson, outlets_geojson, transform, teal, teal_dark, gold, fill_alpha=0.22):
+    """Draws the watershed polygon, river network and outlet markers using an
+    already-built lon/lat -> page-point transform. Shared by the schematic
+    (plain background) and satellite (image background) map renderers."""
+    from reportlab.lib import colors as rl_colors
 
     # watershed fill + outline
-    c.setFillColor(rl_colors.Color(teal_dark.red, teal_dark.green, teal_dark.blue, alpha=0.22))
+    c.setFillColor(rl_colors.Color(teal_dark.red, teal_dark.green, teal_dark.blue, alpha=fill_alpha))
     c.setStrokeColor(gold)
     c.setLineWidth(1.2)
     for feat in (watershed_geojson or {}).get('features', []):
@@ -499,6 +536,76 @@ def _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson
         c.setFillColor(gold if is_snapped else teal_dark)
         r = 2.4 if is_snapped else 1.6
         c.circle(px, py, r, fill=1, stroke=0)
+
+
+def _draw_watershed_vector(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
+    """Plain schematic map: no basemap image, just the watershed/rivers/outlet drawn
+    to fill the box (tight bbox around the geometry, small pixel margin)."""
+    min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson, pad_frac=0.0)
+    transform = _project_factory(min_lon, max_lon, min_lat, max_lat, x0, y0, w, h)
+    _draw_overlay(c, watershed_geojson, rivers_geojson, outlets_geojson, transform, teal, teal_dark, gold)
+    return (min_lon, max_lon, min_lat, max_lat)
+
+
+def fetch_satellite_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900):
+    """Fetches a static satellite (Esri World Imagery) export for the given
+    lon/lat bbox. Returns raw image bytes, or None on any failure (no network,
+    service unavailable, etc.) so the PDF can fall back gracefully."""
+    try:
+        lon_range = max(max_lon - min_lon, 1e-6)
+        lat_range = max(max_lat - min_lat, 1e-6)
+        aspect = lon_range / lat_range
+        height_px = int(round(width_px / aspect)) if aspect > 0 else width_px
+        height_px = max(300, min(height_px, 1400))
+        url = ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export"
+               f"?bbox={min_lon},{min_lat},{max_lon},{max_lat}&bboxSR=4326&imageSR=4326"
+               f"&size={width_px},{height_px}&format=jpg&f=image")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
+    """Watershed overlay drawn on top of a fetched satellite image. Raises on
+    any failure (missing geometry or unreachable imagery service) so the
+    caller can show a fallback message instead."""
+    from reportlab.lib.utils import ImageReader
+
+    min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson, pad_frac=0.18)
+    img_bytes = fetch_satellite_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900)
+    if not img_bytes:
+        raise ValueError('satellite imagery unavailable')
+
+    img = ImageReader(io.BytesIO(img_bytes))
+    c.drawImage(img, x0, y0, width=w, height=h, preserveAspectRatio=False, mask='auto')
+
+    # pad=0: the image already covers exactly [min_lon,max_lon] x [min_lat,max_lat]
+    transform = _project_factory(min_lon, max_lon, min_lat, max_lat, x0, y0, w, h, pad=0)
+    _draw_overlay(c, watershed_geojson, rivers_geojson, outlets_geojson, transform, teal, teal_dark, gold, fill_alpha=0.28)
+    return (min_lon, max_lon, min_lat, max_lat)
+
+
+def _draw_extent_labels(c, min_lon, max_lon, min_lat, max_lat, x0, y0, w, h):
+    """Small lat/lon coordinate chips at the top-left and bottom-right corners
+    of a map box, so each image carries its own geographic reference."""
+    from reportlab.lib import colors as rl_colors
+
+    def chip(text, cx, cy, align='left'):
+        c.setFont('Helvetica', 6.5)
+        tw = c.stringWidth(text, 'Helvetica', 6.5)
+        pad = 1.6
+        rx = cx if align == 'left' else cx - tw
+        c.setFillColor(rl_colors.Color(1, 1, 1, alpha=0.8))
+        c.rect(rx - pad, cy - pad, tw + 2 * pad, 7.8, fill=1, stroke=0)
+        c.setFillColor(rl_colors.HexColor('#222222'))
+        c.drawString(rx, cy, text)
+
+    label_tl = f'{max_lat:.4f}°N, {min_lon:.4f}°E'
+    label_br = f'{min_lat:.4f}°N, {max_lon:.4f}°E'
+    chip(label_tl, x0 + 3, y0 + h - 10, align='left')
+    chip(label_br, x0 + w - 3, y0 + 3, align='right')
 
 
 # ---------- routes ----------
