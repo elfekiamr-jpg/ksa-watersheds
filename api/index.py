@@ -6,6 +6,7 @@ import json
 import math
 import io
 import datetime
+import concurrent.futures
 
 app = Flask(__name__)
 CORS(app)
@@ -235,6 +236,123 @@ def wikipedia_summary(title):
         return None
 
 
+def _compass_direction(deg):
+    dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+            'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+    try:
+        idx = int((float(deg) / 22.5) + 0.5) % 16
+        return dirs[idx]
+    except Exception:
+        return None
+
+
+def fetch_current_weather(lat, lng):
+    """Current relative humidity + wind, from Open-Meteo (free, no API key)."""
+    out = {}
+    try:
+        url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}"
+               "&current=relative_humidity_2m,wind_speed_10m,wind_direction_10m&timezone=auto")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        cur = data.get('current', {}) or {}
+        if cur.get('relative_humidity_2m') is not None:
+            out['relative_humidity_pct'] = cur['relative_humidity_2m']
+        if cur.get('wind_speed_10m') is not None:
+            out['wind_speed_kmh'] = cur['wind_speed_10m']
+        if cur.get('wind_direction_10m') is not None:
+            out['wind_direction_deg'] = cur['wind_direction_10m']
+            out['wind_direction_compass'] = _compass_direction(cur['wind_direction_10m'])
+    except Exception:
+        pass
+    return out
+
+
+def fetch_annual_climate(lat, lng):
+    """Trailing-12-month rainfall total and reference evapotranspiration (ET0),
+    from Open-Meteo's free historical archive (no API key)."""
+    out = {}
+    try:
+        end = datetime.date.today() - datetime.timedelta(days=5)  # archive lags a few days
+        start = end - datetime.timedelta(days=365)
+        url = (f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}"
+               f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
+               "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        daily = data.get('daily', {}) or {}
+        precip = [v for v in daily.get('precipitation_sum', []) if v is not None]
+        et0 = [v for v in daily.get('et0_fao_evapotranspiration', []) if v is not None]
+        if precip:
+            out['annual_rainfall_mm'] = round(sum(precip), 1)
+        if et0:
+            out['et0_annual_mm'] = round(sum(et0), 1)
+    except Exception:
+        pass
+    return out
+
+
+def fetch_land_use_population(lat, lng):
+    """Point-level land-use/land-cover tag and, when the point falls in or near
+    a named place with that data on OSM, its population. Via Nominatim (free,
+    no API key)."""
+    out = {}
+    try:
+        url = ("https://nominatim.openstreetmap.org/reverse?format=json"
+               f"&lat={lat}&lon={lng}&zoom=14&addressdetails=1&extratags=1&accept-language=en")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0 (contact: elfekiamr@gmail.com)'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        category = data.get('category')
+        type_ = (data.get('type') or '').replace('_', ' ').strip()
+        label = type_ or None
+        if category and category not in ('place', 'boundary') and category != type_:
+            label = f'{category}: {label}' if label else category
+        if label:
+            out['land_use'] = label.strip(': ').capitalize()
+        extratags = data.get('extratags') or {}
+        pop = extratags.get('population')
+        if pop:
+            try:
+                out['population'] = int(pop)
+            except (TypeError, ValueError):
+                out['population'] = pop
+    except Exception:
+        pass
+    return out
+
+
+def fetch_environmental_context(lat, lng):
+    """Best-effort meteorological/environmental data for the outlet point, run
+    concurrently since each lookup is an independent, unrelated web request.
+    Any field that can't be obtained is simply absent from the result — the
+    PDF renders those as 'NA'."""
+    result = {
+        'annual_rainfall_mm': None,
+        'et0_annual_mm': None,
+        'relative_humidity_pct': None,
+        'wind_speed_kmh': None,
+        'wind_direction_deg': None,
+        'wind_direction_compass': None,
+        'land_use': None,
+        'population': None,
+    }
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            f_weather = ex.submit(fetch_current_weather, lat, lng)
+            f_climate = ex.submit(fetch_annual_climate, lat, lng)
+            f_land = ex.submit(fetch_land_use_population, lat, lng)
+            for f in (f_weather, f_climate, f_land):
+                try:
+                    result.update(f.result(timeout=20) or {})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return result
+
+
 MORPH_LABELS = [
     ('area_km2', 'Drainage area', 'km2'),
     ('perimeter_km', 'Perimeter', 'km'),
@@ -254,8 +372,21 @@ MORPH_LABELS = [
     ('avg_basin_slope', 'Average basin slope', 'm/m'),
 ]
 
+# (label, unit, value-key-in-env_info, always-NA note-or-None)
+ENV_LABELS = [
+    ('Rainfall (trailing 12 months, total)', 'mm/yr', 'annual_rainfall_mm', None),
+    ('Reference evapotranspiration — ET0 (trailing 12 months)', 'mm/yr', 'et0_annual_mm', None),
+    ('Open-water / pan evaporation', 'mm/yr', None, 'not available from a free public API for an arbitrary point'),
+    ('Runoff', '', None, 'no free public point-query API available'),
+    ('Land use / land cover (at outlet point)', '', 'land_use', None),
+    ('Population (nearest named place, if on record)', 'people', 'population', None),
+    ('Relative humidity (current)', '%', 'relative_humidity_pct', None),
+    ('Wind speed (current)', 'km/h', 'wind_speed_kmh', None),
+    ('Wind direction (current)', '', 'wind_direction_compass', None),
+]
 
-def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info):
+
+def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None):
     """Builds the PDF entirely with reportlab vector drawing (no external map-tile/image
     dependency, so it stays reliable on Vercel's serverless Python runtime)."""
     from reportlab.lib.pagesizes import A4
@@ -416,6 +547,63 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(col2_x, y, val_str)
         y -= row_h
         row_i += 1
+
+    # ---- Meteorology & environmental context (best-effort, NA when unavailable) ----
+    y -= 6 * mm
+    if y < margin + 45 * mm:
+        c.showPage()
+        y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Meteorology & environmental context')
+    y -= 6 * mm
+    c.setFont('Helvetica-Oblique', 8)
+    c.setFillColor(GREY)
+    c.drawString(x, y, 'Best-effort lookups from free public data sources for the outlet point — not part of the delineation itself.')
+    y -= 6 * mm
+
+    c.setFont('Helvetica-Bold', 9)
+    c.setFillColor(GREY)
+    c.drawString(x, y, 'Parameter')
+    c.drawString(col2_x, y, 'Value')
+    y -= 3 * mm
+    c.setStrokeColor(colors.HexColor('#cccccc'))
+    c.line(x, y, page_w - margin, y)
+    y -= 5 * mm
+
+    c.setFont('Helvetica', 9.5)
+    row_i = 0
+    env_info = env_info or {}
+    for label, unit, key, na_note in ENV_LABELS:
+        val = env_info.get(key) if key else None
+        if y < margin + 15 * mm:
+            c.showPage()
+            y = page_h - margin
+            c.setFont('Helvetica', 9.5)
+        if row_i % 2 == 0:
+            c.setFillColor(colors.HexColor('#f9f8f5'))
+            c.rect(x, y - 1.5 * mm, page_w - 2 * margin, row_h, fill=1, stroke=0)
+        c.setFillColor(colors.black)
+        c.drawString(x + 1 * mm, y, label)
+        if val is not None and val != '':
+            val_str = f'{val}{(" " + unit) if unit else ""}'
+            c.drawString(col2_x, y, val_str)
+        else:
+            c.setFillColor(GREY)
+            c.drawString(col2_x, y, 'NA')
+            if na_note:
+                note_x = col2_x + c.stringWidth('NA  ', 'Helvetica', 9.5)
+                c.setFont('Helvetica-Oblique', 7.5)
+                c.drawString(note_x, y, f'({na_note})')
+                c.setFont('Helvetica', 9.5)
+        y -= row_h
+        row_i += 1
+
+    c.setFillColor(GREY)
+    c.setFont('Helvetica-Oblique', 7)
+    c.drawString(x, y - 1 * mm,
+                 'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged.')
+    y -= 8 * mm
 
     # ---- Footer ----
     c.setFont('Helvetica-Oblique', 7)
@@ -698,12 +886,26 @@ def report():
         lat = float(lat)
         lng = float(lng)
 
-        geo_info = reverse_geocode(lat, lng)
+        # Run the geocoding lookup and the environmental-data lookups concurrently —
+        # they're independent, unrelated web requests, so there's no reason to
+        # wait on one before starting the others.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f_geo = ex.submit(reverse_geocode, lat, lng)
+            f_env = ex.submit(fetch_environmental_context, lat, lng)
+            try:
+                geo_info = f_geo.result(timeout=15)
+            except Exception:
+                geo_info = {}
+            try:
+                env_info = f_env.result(timeout=25)
+            except Exception:
+                env_info = {}
+
         wiki_title = geo_info.get('place') or geo_info.get('region')
         wiki_info = wikipedia_summary(wiki_title)
 
         pdf_bytes = build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson,
-                                      morphology, geo_info, wiki_info)
+                                      morphology, geo_info, wiki_info, env_info)
 
         filename = f"manabi_watershed_report_{lat:.4f}_{lng:.4f}.pdf"
         return Response(
