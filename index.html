@@ -272,6 +272,7 @@
       <button class="dl-btn" id="dl-kml">Download for Google Earth <span class="arrow">KML ↓</span></button>
       <button class="dl-btn" id="dl-watershed">Download watershed <span class="arrow">GeoJSON ↓</span></button>
       <button class="dl-btn" id="dl-rivers">Download rivers <span class="arrow">GeoJSON ↓</span></button>
+      <button class="dl-btn" id="dl-report">Download PDF report <span class="arrow">PDF ↓</span></button>
     </div>
   </div>
   <div class="drawer-foot">
@@ -281,7 +282,7 @@
 <script>
 // OPTIONAL: Define an explicit backend API endpoint if hosted separately.
 // Leave as empty string "" to default to relative path '/api/delineate'
-window.API_BASE_URL = ""; 
+window.API_BASE_URL = "";
 
 const KSA_BOUNDS = [[12.0, 32.0], [34.0, 57.0]]; 
 const KSA_CENTER = [24.2, 45.3];
@@ -324,6 +325,9 @@ let outletMarker = null;
 let lastWatershedGeoJSON = null;
 let lastRiversGeoJSON = null;
 let lastOutletsGeoJSON = null;
+let lastMorphology = null;
+let lastOutletLat = null;
+let lastOutletLng = null;
 const hint = document.getElementById('hint');
 const toast = document.getElementById('toast');
 const drawer = document.getElementById('drawer');
@@ -487,6 +491,48 @@ document.getElementById('dl-watershed').onclick = () => {
 document.getElementById('dl-rivers').onclick = () => {
   if (lastRiversGeoJSON) download(lastRiversGeoJSON, 'rivers.geojson');
 };
+document.getElementById('dl-report').onclick = async () => {
+  if (!lastWatershedGeoJSON || lastOutletLat == null || lastOutletLng == null) return;
+  const btn = document.getElementById('dl-report');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = 'Building report… <span class="arrow">⏳</span>';
+  btn.disabled = true;
+  try {
+    const endpoint = (window.API_BASE_URL || '') + '/api/report';
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        lat: lastOutletLat,
+        lng: lastOutletLng,
+        watershed: lastWatershedGeoJSON,
+        rivers: lastRiversGeoJSON,
+        outlets: lastOutletsGeoJSON,
+        morphology: lastMorphology
+      })
+    });
+    if (!resp.ok) {
+      let msg = 'Could not generate the PDF report.';
+      try { const errData = await resp.json(); if (errData.error) msg = errData.error; } catch (e) {}
+      showToast(msg, 'error');
+      setTimeout(hideToast, 3500);
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `manabi_watershed_report_${lastOutletLat.toFixed(4)}_${lastOutletLng.toFixed(4)}.pdf`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast('Could not reach backend API endpoint for the report.', 'error');
+    setTimeout(hideToast, 3500);
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+};
 
 async function runDelineation(lat, lng){
   hint.style.opacity = 0;
@@ -545,6 +591,9 @@ async function runDelineation(lat, lng){
     document.getElementById('drawer-title').textContent =
       mode === 'up' ? 'Upstream watershed' : 'Downstream flow path';
     renderMorphology(data.morphology);
+    lastMorphology = data.morphology;
+    lastOutletLat = (props.outlet_lat != null) ? props.outlet_lat : lat;
+    lastOutletLng = (props.outlet_lng != null) ? props.outlet_lng : lng;
     drawer.classList.add('open');
   } catch (err) {
     showToast('Could not reach backend API endpoint. Verify API URL or server status.', 'error');
