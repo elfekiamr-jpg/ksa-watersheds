@@ -458,16 +458,18 @@ def fetch_environmental_context(lat, lng):
         'population': None,
         'landcover_class': None,   # Land cover class (Esri/Impact Observatory Sentinel-2 10m) at the outlet point
         'soil_class': None,        # ISRIC SoilGrids WRB dominant class at the outlet point
+        'hsg_class': None,         # Hydrologic soil group A-D (HYSOGs250m) at the outlet point
         'monthly': None,           # {'months','rainfall_mm','et0_mm','wind_speed_kmh','wind_direction_compass'}
         'monthly_humidity': None,  # {'months','humidity_pct'}
     }
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
             f_weather = ex.submit(fetch_current_weather, lat, lng)
             f_climate = ex.submit(fetch_annual_climate, lat, lng)
             f_land = ex.submit(fetch_land_use_population, lat, lng)
             f_humidity = ex.submit(fetch_monthly_humidity, lat, lng)
             f_lcsoil = ex.submit(fetch_landcover_soil_labels, lat, lng)
+            f_hsg = ex.submit(fetch_hsg_point_class, lat, lng)
             for f in (f_weather, f_climate, f_land):
                 try:
                     result.update(f.result(timeout=20) or {})
@@ -477,6 +479,10 @@ def fetch_environmental_context(lat, lng):
                 result['monthly_humidity'] = f_humidity.result(timeout=20)
             except Exception:
                 result['monthly_humidity'] = None
+            try:
+                result['hsg_class'] = f_hsg.result(timeout=15)
+            except Exception:
+                result['hsg_class'] = None
             try:
                 lcsoil = f_lcsoil.result(timeout=15) or {}
                 result['landcover_class'] = lcsoil.get('landcover')
@@ -516,6 +522,7 @@ ENV_LABELS = [
     ('Land use / land cover (OSM tag, at outlet point)', '', 'land_use', None),
     ('Land cover class (Sentinel-2 10m Land Cover, at outlet point)', '', 'landcover_class', None),
     ('Dominant soil type (ISRIC SoilGrids WRB, at outlet point)', '', 'soil_class', None),
+    ('Hydrologic soil group (SCS runoff class, at outlet point)', '', 'hsg_class', None),
     ('Population (nearest named place, if on record)', 'people', 'population', None),
     ('Relative humidity (current)', '%', 'relative_humidity_pct', None),
     ('Wind speed (current)', 'km/h', 'wind_speed_kmh', None),
@@ -695,6 +702,32 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     y = _draw_soil_legend(c, x, y, map_w)
     y -= 10 * mm
 
+    # ---- Map 5: hydrologic soil group (SCS runoff class) ----
+    if y < margin + map_h + 22 * mm:
+        c.showPage()
+        y = page_h - margin
+    map_top5 = y
+    c.setStrokeColor(colors.HexColor('#dddddd'))
+    c.setFillColor(colors.HexColor('#f6f4ef'))
+    c.rect(x, map_top5 - map_h, map_w, map_h, fill=1, stroke=1)
+    try:
+        bbox5 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
+                                       x, map_top5 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
+                                       fetch_hsg_image_bytes)
+        _draw_extent_labels(c, *bbox5, x, map_top5 - map_h, map_w, map_h)
+    except Exception:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawCentredString(x + map_w / 2, map_top5 - map_h / 2, 'Hydrologic soil group layer unavailable')
+
+    c.setFillColor(GREY)
+    c.setFont('Helvetica-Oblique', 7)
+    c.drawString(x, map_top5 - map_h - 5 * mm,
+                 'Map 5 — hydrologic soil group (SCS/NRCS runoff-potential class, HYSOGs250m, 250m resolution) — used by the curve-number runoff method.')
+    y = map_top5 - map_h - 9 * mm
+    y = _draw_hsg_legend(c, x, y, map_w)
+    y -= 10 * mm
+
     # ---- Morphology table ----
     if y < 60 * mm:
         c.showPage()
@@ -790,7 +823,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     c.setFont('Helvetica-Oblique', 7)
     c.drawString(x, y - 1 * mm,
                  'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged; '
-                 'Esri/Impact Observatory Sentinel-2 10m Land Cover for land cover class; ISRIC SoilGrids for dominant soil type.')
+                 'Esri/Impact Observatory Sentinel-2 10m Land Cover for land cover class; ISRIC SoilGrids for dominant soil type; '
+                 'HYSOGs250m (ORNL DAAC) for hydrologic soil group.')
     y -= 8 * mm
 
     # ---- Monthly climate averages (multi-year calendar-month normals) ----
@@ -1154,11 +1188,103 @@ def fetch_soil_legend_bytes():
     return fetch_wms_legend_bytes('https://maps.isric.org/mapserv?map=/map/wrb.map', 'MostProbable')
 
 
+# Hydrologic Soil Group (HSG) — the SCS/NRCS runoff-potential classification
+# (A = low runoff potential / well-drained sandy soils, through D = high
+# runoff potential / poorly-drained clayey soils), used directly by the
+# SCS curve-number method already referenced elsewhere in this report.
+# Source: HYSOGs250m (Ross et al. 2018, ORNL DAAC, DOI:10.3334/ORNLDAAC/1566),
+# a 250m global raster derived from SoilGrids texture + bedrock depth,
+# served as a titiler Cloud-Optimized-GeoTIFF tile/point API.
+HSG_TIF_URL = ('https://data.naturalcapitalalliance.stanford.edu/download/global/'
+               'HYSOGs250m/HYSOGs250m_Soil_Groups_reclassified.tif')
+HSG_TITILER_BASE = 'https://titiler-897938321824.us-west1.run.app/cog'
+HSG_CLASSES = [
+    (1, 'A', 'Low runoff potential — deep, well-drained, sandy soils', '#1a9850'),
+    (2, 'B', 'Moderately low runoff potential — moderately fine to moderately coarse', '#91cf60'),
+    (3, 'C', 'Moderately high runoff potential — fine texture, slow infiltration', '#fc8d59'),
+    (4, 'D', 'High runoff potential — clayey soils, shallow or poorly drained', '#d73027'),
+]
+_HSG_LETTER_BY_VALUE = {v: letter for v, letter, _, _ in HSG_CLASSES}
+_HSG_COLOR_BY_VALUE = {v: hexcol for v, _, _, hexcol in HSG_CLASSES}
+
+
+def fetch_hsg_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900):
+    """Fetches a cropped Hydrologic Soil Group raster (HYSOGs250m) for the
+    given bbox, colored by class A-D, via a titiler COG bbox-crop request.
+    Returns raw PNG bytes, or None on any failure."""
+    try:
+        lon_range = max(max_lon - min_lon, 1e-6)
+        lat_range = max(max_lat - min_lat, 1e-6)
+        aspect = lon_range / lat_range
+        height_px = int(round(width_px / aspect)) if aspect > 0 else width_px
+        height_px = max(300, min(height_px, 1400))
+        colormap = json.dumps({str(v): [int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), 255]
+                                for v, _, _, c in HSG_CLASSES})
+        params = {
+            'url': HSG_TIF_URL, 'bidx': '1', 'colormap': colormap,
+            'width': str(width_px), 'height': str(height_px),
+        }
+        url = (f'{HSG_TITILER_BASE}/bbox/{min_lon},{min_lat},{max_lon},{max_lat}.png'
+               + '?' + urllib.parse.urlencode(params))
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def fetch_hsg_point_class(lat, lng):
+    """Best-effort HSG point query at the outlet via titiler's COG point
+    endpoint. Returns the class letter ('A'-'D'), or None on any failure."""
+    try:
+        params = {'url': HSG_TIF_URL}
+        url = f'{HSG_TITILER_BASE}/point/{lng},{lat}?' + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8', errors='ignore'))
+        values = data.get('values') or data.get('data')
+        if not values:
+            return None
+        code = int(round(float(values[0])))
+        return _HSG_LETTER_BY_VALUE.get(code)
+    except Exception:
+        return None
+
+
+# The 32 official WRB Reference Soil Groups (World Reference Base for Soil
+# Resources) — used to pull the real classification out of the WMS
+# GetFeatureInfo response text, whatever its exact template/layout is,
+# instead of naively parsing "the first line with a colon" (which can just
+# as easily be response boilerplate like "GetFeatureInfo results:").
+WRB_SOIL_GROUPS = [
+    'Acrisols', 'Albeluvisols', 'Alisols', 'Andosols', 'Arenosols', 'Calcisols',
+    'Cambisols', 'Chernozems', 'Cryosols', 'Durisols', 'Ferralsols', 'Fluvisols',
+    'Gleysols', 'Gypsisols', 'Histosols', 'Kastanozems', 'Leptosols', 'Lixisols',
+    'Luvisols', 'Nitisols', 'Phaeozems', 'Planosols', 'Plinthosols', 'Podzols',
+    'Regosols', 'Solonchaks', 'Solonetz', 'Stagnosols', 'Umbrisols', 'Vertisols',
+    'Technosols', 'Anthrosols',
+]
+
+
+def _extract_wrb_class(text):
+    """Finds a real WRB soil-group name anywhere in a GetFeatureInfo response,
+    regardless of the surrounding template text. Returns the class name, or
+    None if no known class name appears (e.g. an empty/no-data pixel, or the
+    server returned something other than actual feature data)."""
+    if not text:
+        return None
+    import re
+    for name in WRB_SOIL_GROUPS:
+        if re.search(r'\b' + name + r'\b', text, re.IGNORECASE):
+            return name
+    return None
+
+
 def fetch_landcover_soil_labels(lat, lng):
     """Best-effort point classification for the outlet: land-cover class name
     (ArcGIS ImageServer identify) and ISRIC dominant soil group (WMS
     GetFeatureInfo). Returns a dict with 'landcover' / 'soil' keys (each may
-    be None)."""
+    be None — never raw/unparsed response text)."""
     out = {'landcover': None, 'soil': None}
     try:
         out['landcover'] = fetch_landcover_point_class(lat, lng)
@@ -1166,14 +1292,7 @@ def fetch_landcover_soil_labels(lat, lng):
         pass
     try:
         soil_text = fetch_wms_point_info('https://maps.isric.org/mapserv?map=/map/wrb.map', 'MostProbable', lng, lat)
-        if soil_text:
-            for line in soil_text.splitlines():
-                line = line.strip()
-                if line and ':' in line:
-                    out['soil'] = line.split(':', 1)[1].strip()[:60]
-                    break
-            if not out['soil'] and soil_text:
-                out['soil'] = soil_text[:60]
+        out['soil'] = _extract_wrb_class(soil_text)
     except Exception:
         pass
     return out
@@ -1262,6 +1381,21 @@ def _draw_soil_legend(c, x0, y0, w):
         c.setFont('Helvetica-Oblique', 7.5)
         c.drawString(x0, y0 - 4, 'Soil-class color key unavailable — the dominant class at the outlet point is listed in the table below.')
         return y0 - 8
+
+
+_HSG_SHORT_LABEL = {
+    'A': 'A — low runoff potential',
+    'B': 'B — moderately low',
+    'C': 'C — moderately high',
+    'D': 'D — high runoff potential',
+}
+
+
+def _draw_hsg_legend(c, x0, y0, w):
+    """Hydrologic Soil Group legend: 4-class swatch strip (A-D, low to high
+    runoff potential) matching the colors used to render the HSG map."""
+    entries = [(hexcol, _HSG_SHORT_LABEL[letter]) for _, letter, _, hexcol in HSG_CLASSES]
+    return _draw_swatch_legend(c, x0, y0, w, entries)
 
 
 def _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
