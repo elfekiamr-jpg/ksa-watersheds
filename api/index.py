@@ -268,29 +268,123 @@ def fetch_current_weather(lat, lng):
     return out
 
 
+def _archive_date_range():
+    end = datetime.date.today() - datetime.timedelta(days=5)  # archive lags a few days
+    start = end - datetime.timedelta(days=365)
+    return start, end
+
+
 def fetch_annual_climate(lat, lng):
-    """Trailing-12-month rainfall total and reference evapotranspiration (ET0),
-    from Open-Meteo's free historical archive (no API key)."""
+    """Trailing-12-month rainfall/ET0/wind totals plus a month-by-month
+    breakdown of the same three, from Open-Meteo's free historical archive
+    (no API key) — one HTTP call covers both the annual figures and the
+    monthly chart data."""
     out = {}
     try:
-        end = datetime.date.today() - datetime.timedelta(days=5)  # archive lags a few days
-        start = end - datetime.timedelta(days=365)
+        start, end = _archive_date_range()
         url = (f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}"
                f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
-               "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto")
+               "&daily=precipitation_sum,et0_fao_evapotranspiration,windspeed_10m_max,winddirection_10m_dominant"
+               "&timezone=auto")
         req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode('utf-8'))
         daily = data.get('daily', {}) or {}
-        precip = [v for v in daily.get('precipitation_sum', []) if v is not None]
-        et0 = [v for v in daily.get('et0_fao_evapotranspiration', []) if v is not None]
-        if precip:
-            out['annual_rainfall_mm'] = round(sum(precip), 1)
-        if et0:
-            out['et0_annual_mm'] = round(sum(et0), 1)
+        dates = daily.get('time', []) or []
+        precip = daily.get('precipitation_sum', []) or []
+        et0 = daily.get('et0_fao_evapotranspiration', []) or []
+        wspd = daily.get('windspeed_10m_max', []) or []
+        wdir = daily.get('winddirection_10m_dominant', []) or []
+
+        precip_clean = [v for v in precip if v is not None]
+        et0_clean = [v for v in et0 if v is not None]
+        if precip_clean:
+            out['annual_rainfall_mm'] = round(sum(precip_clean), 1)
+        if et0_clean:
+            out['et0_annual_mm'] = round(sum(et0_clean), 1)
+
+        if dates:
+            buckets = {}
+            order = []
+            for i, d in enumerate(dates):
+                ym = d[:7]
+                if ym not in buckets:
+                    buckets[ym] = {'rain': 0.0, 'et0': 0.0, 'wspd_sum': 0.0, 'wspd_n': 0, 'wdir': []}
+                    order.append(ym)
+                b = buckets[ym]
+                if i < len(precip) and precip[i] is not None:
+                    b['rain'] += precip[i]
+                if i < len(et0) and et0[i] is not None:
+                    b['et0'] += et0[i]
+                if i < len(wspd) and wspd[i] is not None:
+                    b['wspd_sum'] += wspd[i]
+                    b['wspd_n'] += 1
+                if i < len(wdir) and wdir[i] is not None:
+                    b['wdir'].append(wdir[i])
+
+            months, rain_vals, et0_vals, wspd_vals, wdir_vals = [], [], [], [], []
+            for ym in order:
+                b = buckets[ym]
+                months.append(ym)
+                rain_vals.append(round(b['rain'], 1))
+                et0_vals.append(round(b['et0'], 1))
+                wspd_vals.append(round(b['wspd_sum'] / b['wspd_n'], 1) if b['wspd_n'] else None)
+                if b['wdir']:
+                    sx = sum(math.sin(math.radians(a)) for a in b['wdir'])
+                    sy = sum(math.cos(math.radians(a)) for a in b['wdir'])
+                    mean_deg = (math.degrees(math.atan2(sx, sy)) + 360) % 360
+                    wdir_vals.append(_compass_direction(mean_deg))
+                else:
+                    wdir_vals.append(None)
+
+            out['monthly'] = {
+                'months': months,
+                'rainfall_mm': rain_vals,
+                'et0_mm': et0_vals,
+                'wind_speed_kmh': wspd_vals,
+                'wind_direction_compass': wdir_vals,
+            }
     except Exception:
         pass
     return out
+
+
+def fetch_monthly_humidity(lat, lng):
+    """Best-effort monthly mean relative humidity for the trailing 12 months.
+    Kept as its own request/try-except, isolated from fetch_annual_climate,
+    since this particular daily aggregate isn't guaranteed to be available —
+    a failure here should never take down the rainfall/ET0/wind charts."""
+    try:
+        start, end = _archive_date_range()
+        url = (f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}"
+               f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
+               "&daily=relative_humidity_2m_mean&timezone=auto")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        daily = data.get('daily', {}) or {}
+        dates = daily.get('time', []) or []
+        hum = daily.get('relative_humidity_2m_mean', []) or []
+        if not dates or not hum:
+            return None
+        buckets = {}
+        order = []
+        for i, d in enumerate(dates):
+            ym = d[:7]
+            if ym not in buckets:
+                buckets[ym] = []
+                order.append(ym)
+            if i < len(hum) and hum[i] is not None:
+                buckets[ym].append(hum[i])
+        months, vals = [], []
+        for ym in order:
+            months.append(ym)
+            vals.append(round(sum(buckets[ym]) / len(buckets[ym]), 1) if buckets[ym] else None)
+        if not any(v is not None for v in vals):
+            return None
+        return {'months': months, 'humidity_pct': vals}
+    except Exception:
+        return None
 
 
 def fetch_land_use_population(lat, lng):
@@ -337,17 +431,24 @@ def fetch_environmental_context(lat, lng):
         'wind_direction_compass': None,
         'land_use': None,
         'population': None,
+        'monthly': None,           # {'months','rainfall_mm','et0_mm','wind_speed_kmh','wind_direction_compass'}
+        'monthly_humidity': None,  # {'months','humidity_pct'}
     }
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
             f_weather = ex.submit(fetch_current_weather, lat, lng)
             f_climate = ex.submit(fetch_annual_climate, lat, lng)
             f_land = ex.submit(fetch_land_use_population, lat, lng)
+            f_humidity = ex.submit(fetch_monthly_humidity, lat, lng)
             for f in (f_weather, f_climate, f_land):
                 try:
                     result.update(f.result(timeout=20) or {})
                 except Exception:
                     pass
+            try:
+                result['monthly_humidity'] = f_humidity.result(timeout=20)
+            except Exception:
+                result['monthly_humidity'] = None
     except Exception:
         pass
     return result
@@ -605,6 +706,74 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
                  'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged.')
     y -= 8 * mm
 
+    # ---- Monthly climate trends (trailing 12 months) ----
+    env_info = env_info or {}
+    monthly = env_info.get('monthly')
+    monthly_hum = env_info.get('monthly_humidity')
+    if monthly and monthly.get('months'):
+        chart_h = 40 * mm
+        chart_gap = 8 * mm
+        chart_w = page_w - 2 * margin
+
+        c.showPage()
+        y = page_h - margin
+        c.setFillColor(DARK)
+        c.setFont('Helvetica-Bold', 13)
+        c.drawString(x, y, 'Monthly climate trends')
+        y -= 6 * mm
+        c.setFont('Helvetica-Oblique', 8)
+        c.setFillColor(GREY)
+        c.drawString(x, y, f"Trailing 12 months ({monthly['months'][0]} to {monthly['months'][-1]}), from Open-Meteo's historical archive.")
+        y -= 8 * mm
+
+        months = monthly['months']
+
+        # Rainfall
+        if y - chart_h < margin:
+            c.showPage()
+            y = page_h - margin
+        _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('rainfall_mm', []),
+                         'mm/mo', TEAL_DARK, 'Monthly rainfall', GREY, DARK)
+        y -= (chart_h + chart_gap)
+
+        # ET0
+        if y - chart_h < margin:
+            c.showPage()
+            y = page_h - margin
+        _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('et0_mm', []),
+                         'mm/mo', GOLD, 'Monthly reference evapotranspiration (ET0)', GREY, DARK)
+        y -= (chart_h + chart_gap)
+
+        # Wind speed, with dominant direction labeled above each bar
+        if y - chart_h < margin:
+            c.showPage()
+            y = page_h - margin
+        _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('wind_speed_kmh', []),
+                         'km/h avg', TEAL, 'Monthly wind speed (avg of daily max) & dominant direction', GREY, DARK,
+                         top_labels=monthly.get('wind_direction_compass'))
+        y -= (chart_h + chart_gap)
+
+        # Humidity (best-effort, separate fetch — may be entirely unavailable)
+        if y - chart_h < margin:
+            c.showPage()
+            y = page_h - margin
+        if monthly_hum and monthly_hum.get('months'):
+            _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, monthly_hum['months'], monthly_hum.get('humidity_pct', []),
+                             '% avg', colors.HexColor('#7a8fa6'), 'Monthly relative humidity', GREY, DARK)
+        else:
+            c.setFillColor(DARK)
+            c.setFont('Helvetica-Bold', 10)
+            c.drawString(x, y - 8, 'Monthly relative humidity')
+            c.setFillColor(GREY)
+            c.setFont('Helvetica', 8)
+            c.drawString(x, y - chart_h / 2, 'NA — monthly humidity series not available from the free data source used.')
+        y -= (chart_h + chart_gap)
+
+        c.setFillColor(GREY)
+        c.setFont('Helvetica-Oblique', 7)
+        c.drawString(x, max(y, margin),
+                     'Source: Open-Meteo historical archive (open-meteo.com), ERA5-based reanalysis. Wind speed/direction: daily maximum, monthly-averaged.')
+
     # ---- Footer ----
     c.setFont('Helvetica-Oblique', 7)
     c.setFillColor(GREY)
@@ -794,6 +963,75 @@ def _draw_extent_labels(c, min_lon, max_lon, min_lat, max_lat, x0, y0, w, h):
     label_br = f'{min_lat:.4f}°N, {max_lon:.4f}°E'
     chip(label_tl, x0 + 3, y0 + h - 10, align='left')
     chip(label_br, x0 + w - 3, y0 + 3, align='right')
+
+
+_MONTH_ABBR = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+               7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
+
+
+def _month_short_label(ym, is_endpoint=False):
+    try:
+        year, month = ym.split('-')
+        abbr = _MONTH_ABBR.get(int(month), month)
+        return f"{abbr} '{year[2:]}" if is_endpoint else abbr
+    except Exception:
+        return ym
+
+
+def _draw_bar_chart(c, x0, y0, w, h, months, values, unit, bar_color, title, grey, dark, top_labels=None):
+    """A minimal, dependency-free monthly bar chart drawn straight onto the
+    reportlab canvas — consistent with how the maps are drawn (no external
+    charting library). `months` are 'YYYY-MM' strings in chronological order."""
+    from reportlab.lib import colors as rl_colors
+
+    c.setFillColor(dark)
+    c.setFont('Helvetica-Bold', 10)
+    c.drawString(x0, y0 + h - 8, title)
+
+    n = len(months)
+    if n == 0 or all(v is None for v in values):
+        c.setFillColor(grey)
+        c.setFont('Helvetica', 8)
+        c.drawString(x0, y0 + h / 2, 'No data available')
+        return
+
+    axis_label_h = 9
+    top_label_h = 8 if top_labels else 0
+    plot_top = y0 + h - 16 - top_label_h
+    plot_bottom = y0 + axis_label_h
+    plot_h = max(plot_top - plot_bottom, 1)
+
+    numeric_vals = [v for v in values if v is not None]
+    max_val = max(numeric_vals) if numeric_vals else 1
+    if max_val <= 0:
+        max_val = 1
+
+    bar_gap = 1.2
+    bar_w = (w - bar_gap * (n - 1)) / n if n else w
+
+    c.setStrokeColor(rl_colors.HexColor('#cccccc'))
+    c.setLineWidth(0.6)
+    c.line(x0, plot_bottom, x0 + w, plot_bottom)
+
+    c.setFont('Helvetica', 5.6)
+    for i, (ym, val) in enumerate(zip(months, values)):
+        bx = x0 + i * (bar_w + bar_gap)
+        if val is not None:
+            bar_h = (val / max_val) * plot_h
+            c.setFillColor(bar_color)
+            c.rect(bx, plot_bottom, bar_w, bar_h, fill=1, stroke=0)
+            if top_labels and top_labels[i]:
+                c.setFillColor(grey)
+                c.setFont('Helvetica', 5.2)
+                c.drawCentredString(bx + bar_w / 2, plot_bottom + bar_h + 1.5, str(top_labels[i]))
+                c.setFont('Helvetica', 5.6)
+        is_endpoint = (i == 0 or i == n - 1)
+        c.setFillColor(grey)
+        c.drawCentredString(bx + bar_w / 2, y0 + 1, _month_short_label(ym, is_endpoint))
+
+    c.setFillColor(grey)
+    c.setFont('Helvetica', 6.5)
+    c.drawString(x0, plot_top + 2, f'max {max_val:g} {unit}'.strip())
 
 
 # ---------- routes ----------
