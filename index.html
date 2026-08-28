@@ -121,6 +121,35 @@
   }
   .basemap-toggle button.active{ background:var(--water); color:#0d1a18; }
   body.basemap-alt .leaflet-tile-pane{ filter:none; }
+  .overlay-toggle{
+    position:absolute; bottom:24px; left:150px; z-index:1000;
+    display:flex; background:var(--panel);
+    border:1px solid var(--line); border-radius:999px;
+    padding:4px; gap:4px;
+  }
+  .overlay-toggle button{
+    font-family:'IBM Plex Sans', sans-serif; font-size:13px; font-weight:500;
+    border:none; background:transparent; color:var(--muted);
+    padding:8px 14px; border-radius:999px; cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .overlay-toggle button.active{ background:var(--sand); color:#0d1a18; }
+  .layer-legend{
+    position:absolute; bottom:70px; left:20px; z-index:1000;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:10px 12px; font-size:11.5px; color:var(--text);
+    max-width:220px; display:none;
+  }
+  .layer-legend.show{ display:block; }
+  .layer-legend .lg-title{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.08em;
+    text-transform:uppercase; color:var(--muted); margin-bottom:6px;
+  }
+  .layer-legend .lg-row{ display:flex; align-items:center; gap:7px; margin-bottom:3px; }
+  .layer-legend .lg-swatch{ width:11px; height:11px; border-radius:3px; flex:none; }
+  @media (max-width:600px){
+    .overlay-toggle{ left:auto; right:20px; bottom:24px; }
+  }
   .hint{
     position:absolute; bottom:24px; left:50%; transform:translateX(-50%);
     z-index:1000; background:var(--panel); border:1px solid var(--line);
@@ -244,6 +273,11 @@
   <button class="active" data-basemap="light">Map</button>
   <button data-basemap="satellite">Satellite</button>
 </div>
+<div class="overlay-toggle" id="overlay-toggle">
+  <button data-overlay="landcover">Land cover</button>
+  <button data-overlay="soil">Soil type</button>
+</div>
+<div class="layer-legend" id="layer-legend"></div>
 <div class="toast" id="toast"></div>
 <div class="drawer" id="drawer">
   <div class="drawer-head">
@@ -319,7 +353,68 @@ document.querySelectorAll('#basemap-toggle button').forEach(btn => {
   };
 });
 
-let mode = 'up'; 
+const landcoverLayer = L.tileLayer.wms('https://titiler.terrascope.be/wms', {
+  layers: 'WORLDCOVER_2021_MAP',
+  format: 'image/png',
+  transparent: true,
+  opacity: 0.65,
+  attribution: 'ESA WorldCover 2021',
+});
+const soilLayer = L.tileLayer.wms('https://maps.isric.org/mapserv?map=/map/wrb.map', {
+  layers: 'MostProbable',
+  format: 'image/png',
+  transparent: true,
+  opacity: 0.65,
+  attribution: 'ISRIC SoilGrids (WRB)',
+});
+const overlays = { landcover: landcoverLayer, soil: soilLayer };
+let activeOverlay = null;
+
+const LANDCOVER_LEGEND = [
+  ['#006400','Tree cover'], ['#ffbb22','Shrubland'], ['#ffff4c','Grassland'],
+  ['#f096ff','Cropland'], ['#fa0000','Built-up'], ['#b4b4b4','Bare / sparse vegetation'],
+  ['#f0f0f0','Snow and ice'], ['#0064c8','Permanent water bodies'],
+  ['#0096a0','Herbaceous wetland'], ['#00cf75','Mangroves'], ['#fae6a0','Moss and lichen'],
+];
+const SOIL_LEGEND_NOTE = 'WRB most-probable soil class (ISRIC SoilGrids, 250m). Colors vary by class — zoom in and use the ISRIC layer directly for a full key.';
+
+const layerLegend = document.getElementById('layer-legend');
+function showLegend(key){
+  if (key === 'landcover'){
+    layerLegend.innerHTML = '<div class="lg-title">ESA WorldCover 2021</div>' +
+      LANDCOVER_LEGEND.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
+    layerLegend.classList.add('show');
+  } else if (key === 'soil'){
+    layerLegend.innerHTML = '<div class="lg-title">ISRIC SoilGrids — Soil type</div>' + SOIL_LEGEND_NOTE;
+    layerLegend.classList.add('show');
+  } else {
+    layerLegend.classList.remove('show');
+    layerLegend.innerHTML = '';
+  }
+}
+
+document.querySelectorAll('#overlay-toggle button').forEach(btn => {
+  btn.onclick = () => {
+    const key = btn.dataset.overlay;
+    if (activeOverlay === key){
+      map.removeLayer(overlays[key]);
+      activeOverlay = null;
+      btn.classList.remove('active');
+      showLegend(null);
+      return;
+    }
+    if (activeOverlay){
+      map.removeLayer(overlays[activeOverlay]);
+      document.querySelector(`#overlay-toggle button[data-overlay="${activeOverlay}"]`).classList.remove('active');
+    }
+    overlays[key].addTo(map);
+    activeOverlay = key;
+    btn.classList.add('active');
+    showLegend(key);
+  };
+});
+
+let mode = 'up';
 let resultLayer = L.layerGroup().addTo(map);
 let outletMarker = null;
 let lastWatershedGeoJSON = null;
