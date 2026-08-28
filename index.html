@@ -277,6 +277,7 @@
 <div class="overlay-toggle" id="overlay-toggle">
   <button data-overlay="landcover">Land cover</button>
   <button data-overlay="soil">Soil type</button>
+  <button data-overlay="hsg">Runoff group</button>
 </div>
 <div class="layer-legend" id="layer-legend"></div>
 <div class="toast" id="toast"></div>
@@ -369,7 +370,19 @@ const soilLayer = L.tileLayer.wms('https://maps.isric.org/mapserv?map=/map/wrb.m
   opacity: 0.65,
   attribution: 'ISRIC SoilGrids (WRB)',
 });
-const overlays = { landcover: landcoverLayer, soil: soilLayer };
+
+// Hydrologic Soil Group (SCS/NRCS runoff-potential class A-D), used by the
+// curve-number runoff method. Source: HYSOGs250m (ORNL DAAC), served as a
+// titiler Cloud-Optimized-GeoTIFF tile endpoint with a discrete 4-class colormap.
+const HSG_TIF_URL = 'https://data.naturalcapitalalliance.stanford.edu/download/global/HYSOGs250m/HYSOGs250m_Soil_Groups_reclassified.tif';
+const HSG_COLORMAP = { '1':[26,150,65,255], '2':[145,207,96,255], '3':[252,141,89,255], '4':[215,25,28,255] };
+const hsgLayer = L.tileLayer(
+  `https://titiler-897938321824.us-west1.run.app/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png` +
+  `?url=${encodeURIComponent(HSG_TIF_URL)}&bidx=1&colormap=${encodeURIComponent(JSON.stringify(HSG_COLORMAP))}`,
+  { opacity: 0.65, attribution: 'HYSOGs250m (ORNL DAAC)', maxZoom: 13 }
+);
+
+const overlays = { landcover: landcoverLayer, soil: soilLayer, hsg: hsgLayer };
 let activeOverlay = null;
 
 // Official 9-class palette for the Esri/Impact Observatory Sentinel-2 10m Land Cover layer.
@@ -380,6 +393,11 @@ const LANDCOVER_LEGEND = [
 ];
 // ISRIC's own legend graphic — the authoritative color key for the ~30 WRB soil classes.
 const SOIL_LEGEND_URL = 'https://maps.isric.org/mapserv?map=/map/wrb.map&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetLegendGraphic&LAYER=MostProbable&FORMAT=image/png';
+// Colors match HSG_COLORMAP above (values 1-4 = classes A-D).
+const HSG_LEGEND = [
+  ['#1a9850','A — low runoff potential'], ['#91cf60','B — moderately low'],
+  ['#fc8d59','C — moderately high'], ['#d73027','D — high runoff potential'],
+];
 
 const layerLegend = document.getElementById('layer-legend');
 function showLegend(key){
@@ -390,6 +408,10 @@ function showLegend(key){
   } else if (key === 'soil'){
     layerLegend.innerHTML = '<div class="lg-title">Soil type — WRB class (ISRIC)</div>' +
       `<img src="${SOIL_LEGEND_URL}" alt="Soil type legend" style="max-width:100%;display:block;" />`;
+    layerLegend.classList.add('show');
+  } else if (key === 'hsg'){
+    layerLegend.innerHTML = '<div class="lg-title">Hydrologic soil group (runoff potential)</div>' +
+      HSG_LEGEND.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
     layerLegend.classList.add('show');
   } else {
     layerLegend.classList.remove('show');
