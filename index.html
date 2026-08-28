@@ -385,12 +385,14 @@ const hsgLayer = L.tileLayer(
 const overlays = { landcover: landcoverLayer, soil: soilLayer, hsg: hsgLayer };
 let activeOverlay = null;
 
-// Official 9-class palette for the Esri/Impact Observatory Sentinel-2 10m Land Cover layer.
-const LANDCOVER_LEGEND = [
-  ['#419bdf','Water'], ['#397d49','Trees'], ['#7a87c6','Flooded vegetation'],
-  ['#e49635','Crops'], ['#c4281b','Built area'], ['#a59b8f','Bare ground'],
-  ['#a8ebff','Snow / ice'], ['#616161','Clouds'], ['#e3e2c3','Rangeland'],
-];
+// Official 9-class palette for the Esri/Impact Observatory Sentinel-2 10m Land Cover layer,
+// keyed by the raster's actual pixel value so sampled points can be matched to a class.
+const LANDCOVER_BY_VALUE = {
+  1: ['#419bdf','Water'], 2: ['#397d49','Trees'], 4: ['#7a87c6','Flooded vegetation'],
+  5: ['#e49635','Crops'], 7: ['#c4281b','Built area'], 8: ['#a59b8f','Bare ground'],
+  9: ['#a8ebff','Snow / ice'], 10: ['#616161','Clouds'], 11: ['#e3e2c3','Rangeland'],
+};
+const LANDCOVER_LEGEND = Object.values(LANDCOVER_BY_VALUE);
 // ISRIC's own legend graphic — the authoritative color key for the ~30 WRB soil classes.
 const SOIL_LEGEND_URL = 'https://maps.isric.org/mapserv?map=/map/wrb.map&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetLegendGraphic&LAYER=MostProbable&FORMAT=image/png';
 // Colors match HSG_COLORMAP above (values 1-4 = classes A-D).
@@ -399,12 +401,61 @@ const HSG_LEGEND = [
   ['#fc8d59','C — moderately high'], ['#d73027','D — high runoff potential'],
 ];
 
+// Samples the land-cover raster at a grid of points across the current map view
+// (via the source ImageServer's own /identify endpoint — the same one used for the
+// single-point outlet classification) so the legend can show only classes that are
+// actually present, instead of the full fixed 9-class key regardless of location.
+async function sampleLandcoverClassesInView(){
+  const b = map.getBounds();
+  const cols = 5, rows = 5;
+  const points = [];
+  for (let i = 0; i < cols; i++){
+    for (let j = 0; j < rows; j++){
+      const lng = b.getWest() + (b.getEast() - b.getWest()) * (i + 0.5) / cols;
+      const lat = b.getSouth() + (b.getNorth() - b.getSouth()) * (j + 0.5) / rows;
+      points.push([lat, lng]);
+    }
+  }
+  const base = 'https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer/identify';
+  const found = new Set();
+  await Promise.all(points.map(async ([lat, lng]) => {
+    try {
+      const geometry = JSON.stringify({ x: lng, y: lat, spatialReference: { wkid: 4326 } });
+      const params = new URLSearchParams({ geometry, geometryType: 'esriGeometryPoint', sr: '4326', returnCatalogItems: 'false', f: 'json' });
+      const resp = await fetch(`${base}?${params}`);
+      const data = await resp.json();
+      const code = parseInt(data && data.value, 10);
+      if (!Number.isNaN(code) && LANDCOVER_BY_VALUE[code]) found.add(code);
+    } catch (e) { /* one failed sample point is fine — ignore */ }
+  }));
+  return found;
+}
+
 const layerLegend = document.getElementById('layer-legend');
+let landcoverSampleToken = 0;
+
+async function renderLandcoverLegend(){
+  const myToken = ++landcoverSampleToken;
+  layerLegend.innerHTML = '<div class="lg-title">Land cover (Sentinel-2, 10m)</div><div class="lg-row" style="color:var(--muted);">Checking classes in view…</div>';
+  layerLegend.classList.add('show');
+  let found;
+  try {
+    found = await sampleLandcoverClassesInView();
+  } catch (e) {
+    found = null;
+  }
+  if (myToken !== landcoverSampleToken || activeOverlay !== 'landcover') return; // stale — view/overlay changed since
+  const entries = (found && found.size)
+    ? [...found].sort((a, b) => a - b).map(code => LANDCOVER_BY_VALUE[code])
+    : LANDCOVER_LEGEND; // fall back to the full key if sampling found nothing / failed
+  layerLegend.innerHTML = '<div class="lg-title">Land cover in view (Sentinel-2, 10m)</div>' +
+    entries.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
+  layerLegend.classList.add('show');
+}
+
 function showLegend(key){
   if (key === 'landcover'){
-    layerLegend.innerHTML = '<div class="lg-title">Land cover (Sentinel-2, 10m)</div>' +
-      LANDCOVER_LEGEND.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
-    layerLegend.classList.add('show');
+    renderLandcoverLegend();
   } else if (key === 'soil'){
     layerLegend.innerHTML = '<div class="lg-title">Soil type — WRB class (ISRIC)</div>' +
       `<img src="${SOIL_LEGEND_URL}" alt="Soil type legend" style="max-width:100%;display:block;" />`;
@@ -414,10 +465,20 @@ function showLegend(key){
       HSG_LEGEND.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
     layerLegend.classList.add('show');
   } else {
+    landcoverSampleToken++; // invalidate any in-flight land-cover sample
     layerLegend.classList.remove('show');
     layerLegend.innerHTML = '';
   }
 }
+
+// Re-sample when the map is panned/zoomed while the land-cover overlay is active,
+// so the legend keeps matching what's actually on screen.
+let landcoverResampleTimer = null;
+map.on('moveend', () => {
+  if (activeOverlay !== 'landcover') return;
+  clearTimeout(landcoverResampleTimer);
+  landcoverResampleTimer = setTimeout(renderLandcoverLegend, 400);
+});
 
 document.querySelectorAll('#overlay-toggle button').forEach(btn => {
   btn.onclick = () => {
