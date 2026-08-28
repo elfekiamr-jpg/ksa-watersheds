@@ -274,20 +274,30 @@ def _archive_date_range():
     return start, end
 
 
+_NORMALS_YEARS = 10  # how many years of history to average per calendar month
+
+
+def _normals_date_range(years=_NORMALS_YEARS):
+    end = datetime.date.today() - datetime.timedelta(days=5)  # archive lags a few days
+    start = datetime.date(end.year - years, 1, 1)
+    return start, end
+
+
 def fetch_annual_climate(lat, lng):
-    """Trailing-12-month rainfall/ET0/wind totals plus a month-by-month
-    breakdown of the same three, from Open-Meteo's free historical archive
-    (no API key) — one HTTP call covers both the annual figures and the
-    monthly chart data."""
+    """Trailing-12-month rainfall/ET0 totals (recent-year figures shown in the
+    summary table) plus true calendar-month climatological averages of
+    rainfall/ET0/wind — each calendar month averaged across ~10 years of
+    history, not just one arbitrary year — from Open-Meteo's free historical
+    archive (no API key). One HTTP call covers both."""
     out = {}
     try:
-        start, end = _archive_date_range()
+        start, end = _normals_date_range()
         url = (f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}"
                f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
                "&daily=precipitation_sum,et0_fao_evapotranspiration,windspeed_10m_max,winddirection_10m_dominant"
                "&timezone=auto")
         req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             data = json.loads(resp.read().decode('utf-8'))
         daily = data.get('daily', {}) or {}
         dates = daily.get('time', []) or []
@@ -295,94 +305,109 @@ def fetch_annual_climate(lat, lng):
         et0 = daily.get('et0_fao_evapotranspiration', []) or []
         wspd = daily.get('windspeed_10m_max', []) or []
         wdir = daily.get('winddirection_10m_dominant', []) or []
+        if not dates:
+            return out
 
-        precip_clean = [v for v in precip if v is not None]
-        et0_clean = [v for v in et0 if v is not None]
-        if precip_clean:
-            out['annual_rainfall_mm'] = round(sum(precip_clean), 1)
-        if et0_clean:
-            out['et0_annual_mm'] = round(sum(et0_clean), 1)
+        # Trailing-12-month totals (most recent 365 days of the same response) —
+        # the single "recent year" figures shown in the summary table.
+        cutoff = (end - datetime.timedelta(days=365)).isoformat()
+        recent_precip = [precip[i] for i, d in enumerate(dates) if d >= cutoff and i < len(precip) and precip[i] is not None]
+        recent_et0 = [et0[i] for i, d in enumerate(dates) if d >= cutoff and i < len(et0) and et0[i] is not None]
+        if recent_precip:
+            out['annual_rainfall_mm'] = round(sum(recent_precip), 1)
+        if recent_et0:
+            out['et0_annual_mm'] = round(sum(recent_et0), 1)
 
-        if dates:
-            buckets = {}
-            order = []
-            for i, d in enumerate(dates):
-                ym = d[:7]
-                if ym not in buckets:
-                    buckets[ym] = {'rain': 0.0, 'et0': 0.0, 'wspd_sum': 0.0, 'wspd_n': 0, 'wdir': []}
-                    order.append(ym)
-                b = buckets[ym]
-                if i < len(precip) and precip[i] is not None:
-                    b['rain'] += precip[i]
-                if i < len(et0) and et0[i] is not None:
-                    b['et0'] += et0[i]
-                if i < len(wspd) and wspd[i] is not None:
-                    b['wspd_sum'] += wspd[i]
-                    b['wspd_n'] += 1
-                if i < len(wdir) and wdir[i] is not None:
-                    b['wdir'].append(wdir[i])
+        # Calendar-month climatological averages: bucket every day by (year, month)
+        # first, then average each calendar month's per-year totals across however
+        # many years of data are actually present.
+        year_month = {}  # (year, month) -> accumulators
+        years_seen = set()
+        for i, d in enumerate(dates):
+            y, m = int(d[:4]), int(d[5:7])
+            key = (y, m)
+            years_seen.add(y)
+            if key not in year_month:
+                year_month[key] = {'rain': 0.0, 'et0': 0.0, 'wspd_sum': 0.0, 'wspd_n': 0, 'wdir': []}
+            b = year_month[key]
+            if i < len(precip) and precip[i] is not None:
+                b['rain'] += precip[i]
+            if i < len(et0) and et0[i] is not None:
+                b['et0'] += et0[i]
+            if i < len(wspd) and wspd[i] is not None:
+                b['wspd_sum'] += wspd[i]
+                b['wspd_n'] += 1
+            if i < len(wdir) and wdir[i] is not None:
+                b['wdir'].extend(wdir[i:i + 1])
 
-            months, rain_vals, et0_vals, wspd_vals, wdir_vals = [], [], [], [], []
-            for ym in order:
-                b = buckets[ym]
-                months.append(ym)
-                rain_vals.append(round(b['rain'], 1))
-                et0_vals.append(round(b['et0'], 1))
-                wspd_vals.append(round(b['wspd_sum'] / b['wspd_n'], 1) if b['wspd_n'] else None)
-                if b['wdir']:
-                    sx = sum(math.sin(math.radians(a)) for a in b['wdir'])
-                    sy = sum(math.cos(math.radians(a)) for a in b['wdir'])
-                    mean_deg = (math.degrees(math.atan2(sx, sy)) + 360) % 360
-                    wdir_vals.append(_compass_direction(mean_deg))
-                else:
-                    wdir_vals.append(None)
+        month_labels = [_MONTH_ABBR[m] for m in range(1, 13)]
+        rain_vals, et0_vals, wspd_vals, wdir_vals = [], [], [], []
+        for m in range(1, 13):
+            month_entries = [b for (y, mo), b in year_month.items() if mo == m]
+            if not month_entries:
+                rain_vals.append(None); et0_vals.append(None); wspd_vals.append(None); wdir_vals.append(None)
+                continue
+            rain_vals.append(round(sum(e['rain'] for e in month_entries) / len(month_entries), 1))
+            et0_vals.append(round(sum(e['et0'] for e in month_entries) / len(month_entries), 1))
+            wspd_daily_means = [e['wspd_sum'] / e['wspd_n'] for e in month_entries if e['wspd_n']]
+            wspd_vals.append(round(sum(wspd_daily_means) / len(wspd_daily_means), 1) if wspd_daily_means else None)
+            all_dirs = [a for e in month_entries for a in e['wdir']]
+            if all_dirs:
+                sx = sum(math.sin(math.radians(a)) for a in all_dirs)
+                sy = sum(math.cos(math.radians(a)) for a in all_dirs)
+                mean_deg = (math.degrees(math.atan2(sx, sy)) + 360) % 360
+                wdir_vals.append(_compass_direction(mean_deg))
+            else:
+                wdir_vals.append(None)
 
-            out['monthly'] = {
-                'months': months,
-                'rainfall_mm': rain_vals,
-                'et0_mm': et0_vals,
-                'wind_speed_kmh': wspd_vals,
-                'wind_direction_compass': wdir_vals,
-            }
+        out['monthly'] = {
+            'months': month_labels,
+            'rainfall_mm': rain_vals,
+            'et0_mm': et0_vals,
+            'wind_speed_kmh': wspd_vals,
+            'wind_direction_compass': wdir_vals,
+            'year_start': min(years_seen) if years_seen else None,
+            'year_end': max(years_seen) if years_seen else None,
+        }
     except Exception:
         pass
     return out
 
 
 def fetch_monthly_humidity(lat, lng):
-    """Best-effort monthly mean relative humidity for the trailing 12 months.
-    Kept as its own request/try-except, isolated from fetch_annual_climate,
-    since this particular daily aggregate isn't guaranteed to be available —
-    a failure here should never take down the rainfall/ET0/wind charts."""
+    """Best-effort calendar-month average relative humidity, across the same
+    ~10-year window as fetch_annual_climate. Kept as its own request/try-except
+    since this daily aggregate isn't guaranteed available — a failure here
+    should never take down the rainfall/ET0/wind charts."""
     try:
-        start, end = _archive_date_range()
+        start, end = _normals_date_range()
         url = (f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}"
                f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
                "&daily=relative_humidity_2m_mean&timezone=auto")
         req = urllib.request.Request(url, headers={'User-Agent': 'Manabi-Watershed-App/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             data = json.loads(resp.read().decode('utf-8'))
         daily = data.get('daily', {}) or {}
         dates = daily.get('time', []) or []
         hum = daily.get('relative_humidity_2m_mean', []) or []
         if not dates or not hum:
             return None
-        buckets = {}
-        order = []
+
+        year_month = {}
         for i, d in enumerate(dates):
-            ym = d[:7]
-            if ym not in buckets:
-                buckets[ym] = []
-                order.append(ym)
-            if i < len(hum) and hum[i] is not None:
-                buckets[ym].append(hum[i])
-        months, vals = [], []
-        for ym in order:
-            months.append(ym)
-            vals.append(round(sum(buckets[ym]) / len(buckets[ym]), 1) if buckets[ym] else None)
+            if i >= len(hum) or hum[i] is None:
+                continue
+            key = (int(d[:4]), int(d[5:7]))
+            year_month.setdefault(key, []).append(hum[i])
+
+        month_labels = [_MONTH_ABBR[m] for m in range(1, 13)]
+        vals = []
+        for m in range(1, 13):
+            month_entries = [v for (y, mo), vs in year_month.items() if mo == m for v in vs]
+            vals.append(round(sum(month_entries) / len(month_entries), 1) if month_entries else None)
         if not any(v is not None for v in vals):
             return None
-        return {'months': months, 'humidity_pct': vals}
+        return {'months': month_labels, 'humidity_pct': vals}
     except Exception:
         return None
 
@@ -706,7 +731,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
                  'Sources: Open-Meteo (open-meteo.com) for rainfall/ET0/humidity/wind; OpenStreetMap Nominatim for land use and population, where tagged.')
     y -= 8 * mm
 
-    # ---- Monthly climate trends (trailing 12 months) ----
+    # ---- Monthly climate averages (multi-year calendar-month normals) ----
     env_info = env_info or {}
     monthly = env_info.get('monthly')
     monthly_hum = env_info.get('monthly_humidity')
@@ -715,15 +740,19 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         chart_gap = 8 * mm
         chart_w = page_w - 2 * margin
 
+        y0_range = monthly.get('year_start')
+        y1_range = monthly.get('year_end')
+        range_str = f"{y0_range}–{y1_range}" if y0_range and y1_range else f"~{_NORMALS_YEARS} years"
+
         c.showPage()
         y = page_h - margin
         c.setFillColor(DARK)
         c.setFont('Helvetica-Bold', 13)
-        c.drawString(x, y, 'Monthly climate trends')
+        c.drawString(x, y, 'Monthly climate averages')
         y -= 6 * mm
         c.setFont('Helvetica-Oblique', 8)
         c.setFillColor(GREY)
-        c.drawString(x, y, f"Trailing 12 months ({monthly['months'][0]} to {monthly['months'][-1]}), from Open-Meteo's historical archive.")
+        c.drawString(x, y, f"Each calendar month averaged across {range_str} of Open-Meteo's historical archive — not a single year's values.")
         y -= 8 * mm
 
         months = monthly['months']
@@ -733,7 +762,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
             c.showPage()
             y = page_h - margin
         _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('rainfall_mm', []),
-                         'mm/mo', TEAL_DARK, 'Monthly rainfall', GREY, DARK)
+                         'mm/mo avg', TEAL_DARK, 'Average monthly rainfall', GREY, DARK)
         y -= (chart_h + chart_gap)
 
         # ET0
@@ -741,7 +770,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
             c.showPage()
             y = page_h - margin
         _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('et0_mm', []),
-                         'mm/mo', GOLD, 'Monthly reference evapotranspiration (ET0)', GREY, DARK)
+                         'mm/mo avg', GOLD, 'Average monthly reference evapotranspiration (ET0)', GREY, DARK)
         y -= (chart_h + chart_gap)
 
         # Wind speed, with dominant direction labeled above each bar
@@ -749,7 +778,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
             c.showPage()
             y = page_h - margin
         _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, months, monthly.get('wind_speed_kmh', []),
-                         'km/h avg', TEAL, 'Monthly wind speed (avg of daily max) & dominant direction', GREY, DARK,
+                         'km/h avg', TEAL, 'Average monthly wind speed (of daily max) & dominant direction', GREY, DARK,
                          top_labels=monthly.get('wind_direction_compass'))
         y -= (chart_h + chart_gap)
 
@@ -759,11 +788,11 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
             y = page_h - margin
         if monthly_hum and monthly_hum.get('months'):
             _draw_bar_chart(c, x, y - chart_h, chart_w, chart_h, monthly_hum['months'], monthly_hum.get('humidity_pct', []),
-                             '% avg', colors.HexColor('#7a8fa6'), 'Monthly relative humidity', GREY, DARK)
+                             '% avg', colors.HexColor('#7a8fa6'), 'Average monthly relative humidity', GREY, DARK)
         else:
             c.setFillColor(DARK)
             c.setFont('Helvetica-Bold', 10)
-            c.drawString(x, y - 8, 'Monthly relative humidity')
+            c.drawString(x, y - 8, 'Average monthly relative humidity')
             c.setFillColor(GREY)
             c.setFont('Helvetica', 8)
             c.drawString(x, y - chart_h / 2, 'NA — monthly humidity series not available from the free data source used.')
