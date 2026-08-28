@@ -6,6 +6,7 @@
 <title>Manabi — Saudi Arabia Watersheds</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -138,7 +139,7 @@
     position:absolute; bottom:70px; left:20px; z-index:1000;
     background:var(--panel); border:1px solid var(--line); border-radius:10px;
     padding:10px 12px; font-size:11.5px; color:var(--text);
-    max-width:220px; display:none;
+    max-width:260px; max-height:60vh; overflow-y:auto; display:none;
   }
   .layer-legend.show{ display:block; }
   .layer-legend .lg-title{
@@ -353,12 +354,13 @@ document.querySelectorAll('#basemap-toggle button').forEach(btn => {
   };
 });
 
-const landcoverLayer = L.tileLayer.wms('https://titiler.terrascope.be/wms', {
-  layers: 'WORLDCOVER_2021_MAP',
-  format: 'image/png',
-  transparent: true,
+// Land cover: Esri / Impact Observatory Sentinel-2 10m Land Cover (ArcGIS ImageServer).
+// Served via esri-leaflet's imageMapLayer since it's not an OGC WMS service.
+const landcoverLayer = L.esri.imageMapLayer({
+  url: 'https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer',
   opacity: 0.65,
-  attribution: 'ESA WorldCover 2021',
+  format: 'png',
+  attribution: 'Esri, Impact Observatory, Sentinel-2',
 });
 const soilLayer = L.tileLayer.wms('https://maps.isric.org/mapserv?map=/map/wrb.map', {
   layers: 'MostProbable',
@@ -370,22 +372,24 @@ const soilLayer = L.tileLayer.wms('https://maps.isric.org/mapserv?map=/map/wrb.m
 const overlays = { landcover: landcoverLayer, soil: soilLayer };
 let activeOverlay = null;
 
+// Official 9-class palette for the Esri/Impact Observatory Sentinel-2 10m Land Cover layer.
 const LANDCOVER_LEGEND = [
-  ['#006400','Tree cover'], ['#ffbb22','Shrubland'], ['#ffff4c','Grassland'],
-  ['#f096ff','Cropland'], ['#fa0000','Built-up'], ['#b4b4b4','Bare / sparse vegetation'],
-  ['#f0f0f0','Snow and ice'], ['#0064c8','Permanent water bodies'],
-  ['#0096a0','Herbaceous wetland'], ['#00cf75','Mangroves'], ['#fae6a0','Moss and lichen'],
+  ['#419bdf','Water'], ['#397d49','Trees'], ['#7a87c6','Flooded vegetation'],
+  ['#e49635','Crops'], ['#c4281b','Built area'], ['#a59b8f','Bare ground'],
+  ['#a8ebff','Snow / ice'], ['#616161','Clouds'], ['#e3e2c3','Rangeland'],
 ];
-const SOIL_LEGEND_NOTE = 'WRB most-probable soil class (ISRIC SoilGrids, 250m). Colors vary by class — zoom in and use the ISRIC layer directly for a full key.';
+// ISRIC's own legend graphic — the authoritative color key for the ~30 WRB soil classes.
+const SOIL_LEGEND_URL = 'https://maps.isric.org/mapserv?map=/map/wrb.map&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetLegendGraphic&LAYER=MostProbable&FORMAT=image/png';
 
 const layerLegend = document.getElementById('layer-legend');
 function showLegend(key){
   if (key === 'landcover'){
-    layerLegend.innerHTML = '<div class="lg-title">ESA WorldCover 2021</div>' +
+    layerLegend.innerHTML = '<div class="lg-title">Land cover (Sentinel-2, 10m)</div>' +
       LANDCOVER_LEGEND.map(([c,l]) => `<div class="lg-row"><span class="lg-swatch" style="background:${c}"></span>${l}</div>`).join('');
     layerLegend.classList.add('show');
   } else if (key === 'soil'){
-    layerLegend.innerHTML = '<div class="lg-title">ISRIC SoilGrids — Soil type</div>' + SOIL_LEGEND_NOTE;
+    layerLegend.innerHTML = '<div class="lg-title">Soil type — WRB class (ISRIC)</div>' +
+      `<img src="${SOIL_LEGEND_URL}" alt="Soil type legend" style="max-width:100%;display:block;" />`;
     layerLegend.classList.add('show');
   } else {
     layerLegend.classList.remove('show');
