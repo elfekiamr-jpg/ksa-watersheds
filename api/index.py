@@ -726,7 +726,35 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
                  'Map 5 — hydrologic soil group (SCS/NRCS runoff-potential class, HYSOGs250m, 250m resolution) — used by the curve-number runoff method.')
     y = map_top5 - map_h - 9 * mm
     y = _draw_hsg_legend(c, x, y, map_w)
-    y -= 10 * mm
+    y -= 6 * mm
+
+    # Classification basis — what determines the A-D class, so the map isn't a black box.
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 8.5)
+    c.drawString(x, y, 'How the class is determined')
+    y -= 4.5 * mm
+    hsg_basis_text = (
+        "Classes are based on the soil's intrinsic ability to absorb water, not on rainfall, land cover, or slope: "
+        '(1) soil texture — sand/silt/clay proportions, the main driver of infiltration rate; '
+        '(2) depth to a restrictive layer — bedrock, hardpan, or another dense layer that blocks downward drainage; '
+        '(3) depth to the water table — how much unsaturated capacity the soil has left; and '
+        '(4) saturated hydraulic conductivity (Ksat) — the direct physical measurement the other three are proxies for. '
+        'A = deep, well-drained, high infiltration (low runoff); D = clay-dominated, shallow, or a high water table, '
+        'with infiltration severely restricted (high runoff). This dataset estimates the class from texture and bedrock-depth '
+        'data, since Ksat is not measured directly at global scale.'
+    )
+    c.setFont('Helvetica', 7.5)
+    c.setFillColor(colors.HexColor('#333333'))
+    hsg_lines = simpleSplit(hsg_basis_text, 'Helvetica', 7.5, map_w)
+    for line in hsg_lines:
+        if y < margin + 8 * mm:
+            c.showPage()
+            y = page_h - margin
+            c.setFont('Helvetica', 7.5)
+            c.setFillColor(colors.HexColor('#333333'))
+        c.drawString(x, y, line)
+        y -= 3.6 * mm
+    y -= 6 * mm
 
     # ---- Morphology table ----
     if y < 60 * mm:
