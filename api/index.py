@@ -441,6 +441,169 @@ def compute_giuh(rivers_geojson, outlet_lat, outlet_lng, area_km2, drainage_dens
     return result
 
 
+# ---------- Relief, hypsometry, and main-channel longitudinal profile ----------
+#
+# Total relief (H = Zmax - Zmin), the hypsometric curve/integral, and the
+# channel profile all need elevations at many points, not just the two
+# (outlet, farthest point) used for Kirpich Tc. To keep this to a single
+# extra network round trip, both point sets are built first (a grid inside
+# the watershed for hypsometry, a resampled main-channel path for the
+# profile) and their elevations are fetched together in one batched
+# OpenTopoData call.
+
+def _trace_main_channel(rivers_geojson, outlet_lat, outlet_lng):
+    """Traces the main channel from the outlet to its farthest headwater by
+    following, at every confluence, whichever tributary has the greater
+    cumulative upstream stream length — reusing the same topology
+    reconstruction as the GIUH computation (reconstructed purely from
+    shared endpoint coordinates, since MERIT reaches carry no explicit
+    up/downstream reach id). Returns an ordered list of [lon, lat]
+    coordinates from the outlet to the headwater, or [] if the network
+    couldn't be resolved."""
+    segments = _extract_river_segments(rivers_geojson)
+    segments = _resolve_river_topology(segments, outlet_lat, outlet_lng)
+    resolved_idxs = [i for i, s in enumerate(segments) if s.get('resolved')]
+    if not resolved_idxs:
+        return []
+    cum = _cumulative_upstream_lengths_km(segments)
+
+    children = defaultdict(list)
+    for i in resolved_idxs:
+        children[segments[i]['downstream_node']].append(i)
+
+    start = max(resolved_idxs, key=lambda i: cum.get(i, 0.0))
+
+    path_coords = []
+    visited = set()
+    cur = start
+    while cur is not None and cur not in visited:
+        visited.add(cur)
+        seg = segments[cur]
+        coords = seg['coords']
+        ordered = coords if _round_node(coords[0]) == seg['downstream_node'] else list(reversed(coords))
+        path_coords.extend(ordered if not path_coords else ordered[1:])
+        kids = [k for k in children.get(seg['upstream_node'], []) if k != cur]
+        cur = max(kids, key=lambda i: cum.get(i, 0.0)) if kids else None
+    return path_coords
+
+
+def _resample_path_by_distance(coords, n_samples):
+    """Resamples a [lon, lat] polyline to n_samples points evenly spaced by
+    cumulative haversine distance along it. Returns a list of
+    (lat, lon, cumulative_distance_km) tuples, distance measured from
+    coords[0]."""
+    if len(coords) < 2 or n_samples < 2:
+        return []
+    cum = [0.0]
+    for i in range(1, len(coords)):
+        cum.append(cum[-1] + haversine_km(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]))
+    total = cum[-1]
+    if total <= 0:
+        return [(coords[0][1], coords[0][0], 0.0)]
+
+    out = []
+    j = 0
+    for k in range(n_samples):
+        t = total * k / (n_samples - 1)
+        while j < len(cum) - 2 and cum[j + 1] < t:
+            j += 1
+        seg_len = cum[j + 1] - cum[j]
+        frac = (t - cum[j]) / seg_len if seg_len > 0 else 0.0
+        lon = coords[j][0] + frac * (coords[j + 1][0] - coords[j][0])
+        lat = coords[j][1] + frac * (coords[j + 1][1] - coords[j][1])
+        out.append((lat, lon, t))
+    return out
+
+
+def compute_hypsometry_sample_points(watershed_geojson, target_points=50):
+    """Grid-samples points inside the watershed polygon for elevation lookup
+    (same oversample-then-keep-inside approach as compute_composite_cn).
+    Returns a list of (lat, lon) tuples, or [] on failure."""
+    try:
+        min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson)
+    except Exception:
+        return []
+    grid_n = 12
+    candidates = []
+    for i in range(grid_n):
+        for j in range(grid_n):
+            lon = min_lon + (max_lon - min_lon) * (i + 0.5) / grid_n
+            lat = min_lat + (max_lat - min_lat) * (j + 0.5) / grid_n
+            if _point_in_watershed(lon, lat, watershed_geojson):
+                candidates.append((lat, lon))
+    if len(candidates) > target_points:
+        step = len(candidates) / target_points
+        candidates = [candidates[int(i * step)] for i in range(target_points)]
+    return candidates
+
+
+def compute_relief_hypsometry_and_profile(watershed_geojson, rivers_geojson, outlet_lat, outlet_lng):
+    """Total relief, hypsometric curve/integral, and main-channel
+    longitudinal profile — fetches every elevation this needs (the
+    hypsometric grid plus the resampled channel path) in a single batched
+    OpenTopoData request. Returns {'hypsometry': {...}, 'profile': {...}},
+    each with 'available': False if it couldn't be computed."""
+    result = {'hypsometry': {'available': False}, 'profile': {'available': False}}
+
+    hyp_coords = compute_hypsometry_sample_points(watershed_geojson)
+    channel_path = _trace_main_channel(rivers_geojson, outlet_lat, outlet_lng)
+    prof_samples = _resample_path_by_distance(channel_path, 30) if len(channel_path) >= 2 else []
+
+    all_coords = hyp_coords + [(lat, lon) for lat, lon, _ in prof_samples]
+    if not all_coords:
+        return result
+    try:
+        elevations = get_elevations(all_coords)
+    except Exception:
+        return result
+
+    n_hyp = len(hyp_coords)
+    hyp_elevs = [e for e in elevations[:n_hyp] if e is not None]
+    prof_elevs = elevations[n_hyp:n_hyp + len(prof_samples)]
+
+    if len(hyp_elevs) >= 8:
+        zmax, zmin = max(hyp_elevs), min(hyp_elevs)
+        zmean = sum(hyp_elevs) / len(hyp_elevs)
+        H = zmax - zmin
+        if H > 0:
+            sorted_desc = sorted(hyp_elevs, reverse=True)
+            n = len(sorted_desc)
+            curve = []
+            for i, z in enumerate(sorted_desc):
+                rel_area = i / (n - 1) if n > 1 else 0.0
+                rel_elev = (z - zmin) / H
+                curve.append({'rel_area': round(rel_area, 4), 'rel_elev': round(rel_elev, 4)})
+            hi = 0.0
+            for i in range(1, len(curve)):
+                x0, x1 = curve[i - 1]['rel_area'], curve[i]['rel_area']
+                y0, y1 = curve[i - 1]['rel_elev'], curve[i]['rel_elev']
+                hi += (x1 - x0) * (y0 + y1) / 2.0
+            result['hypsometry'] = {
+                'available': True,
+                'n_points': n,
+                'z_max_m': round(zmax, 1),
+                'z_min_m': round(zmin, 1),
+                'z_mean_m': round(zmean, 1),
+                'total_relief_m': round(H, 1),
+                'hypsometric_integral': round(hi, 4),
+                'curve': curve,
+            }
+
+    if prof_samples and any(e is not None for e in prof_elevs):
+        points = [{'dist_km': round(d, 3), 'elev_m': round(e, 1)}
+                  for (_, _, d), e in zip(prof_samples, prof_elevs) if e is not None]
+        if len(points) >= 2:
+            result['profile'] = {
+                'available': True,
+                'total_length_km': round(prof_samples[-1][2], 2),
+                'elev_outlet_m': points[0]['elev_m'],
+                'elev_headwater_m': points[-1]['elev_m'],
+                'points': points,
+            }
+
+    return result
+
+
 # ---------- site-info helpers (reverse geocoding + Wikipedia, best-effort) ----------
 
 def reverse_geocode(lat, lng):
@@ -788,7 +951,7 @@ ENV_LABELS = [
 ]
 
 
-def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None, cn_info=None, giuh_info=None):
+def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None, cn_info=None, giuh_info=None, relief_info=None):
     """Builds the PDF entirely with reportlab vector drawing (no external map-tile/image
     dependency, so it stays reliable on Vercel's serverless Python runtime)."""
     from reportlab.lib.pagesizes import A4
@@ -803,6 +966,43 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     margin = 18 * mm
     x = margin
     y = page_h - margin
+
+    # Pre-fetch every map raster + legend concurrently, up front. These were
+    # previously fetched one at a time inside each _draw_*_map() call — five
+    # sequential HTTP round trips (each with its own internal timeout of up
+    # to 15s) stacked back to back is enough on its own to exceed Vercel's
+    # function time budget when any one of the tile/WMS services is slow.
+    # Running them in parallel caps the wait on the slowest single service
+    # instead of their sum.
+    prefetched_images = {}
+    try:
+        map_bbox = _compute_watershed_bbox(watershed_geojson, pad_frac=0.18)
+    except Exception:
+        map_bbox = None
+    if map_bbox:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as _img_ex:
+            _f_sat = _img_ex.submit(fetch_satellite_image_bytes, *map_bbox, width_px=900)
+            _f_lc = _img_ex.submit(fetch_landcover_image_bytes, *map_bbox, width_px=900)
+            _f_soil = _img_ex.submit(fetch_soil_image_bytes, *map_bbox, width_px=900)
+            _f_hsg = _img_ex.submit(fetch_hsg_image_bytes, *map_bbox, width_px=900)
+            _f_soil_legend = _img_ex.submit(fetch_soil_legend_bytes)
+
+            def _wait(fut, timeout=20):
+                try:
+                    return fut.result(timeout=timeout)
+                except Exception:
+                    return None
+
+            prefetched_images = {
+                'satellite': _wait(_f_sat),
+                'landcover': _wait(_f_lc),
+                'soil': _wait(_f_soil),
+                'hsg': _wait(_f_hsg),
+                'soil_legend': _wait(_f_soil_legend),
+            }
+    # If prefetching was skipped or a given fetch failed, the per-map draw
+    # calls below fall back to fetching (and failing/reporting "unavailable")
+    # individually, exactly as before this change.
 
     TEAL = colors.HexColor('#12938a')
     TEAL_DARK = colors.HexColor('#1f7a72')
@@ -898,7 +1098,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
 
     try:
         bbox2 = _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
-                                     x, map_top2 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD)
+                                     x, map_top2 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
+                                     img_bytes=prefetched_images.get('satellite'))
         _draw_extent_labels(c, *bbox2, x, map_top2 - map_h, map_w, map_h)
     except Exception:
         c.setFillColor(GREY)
@@ -921,7 +1122,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     try:
         bbox3 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
                                        x, map_top3 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
-                                       fetch_landcover_image_bytes)
+                                       fetch_landcover_image_bytes,
+                                       img_bytes=prefetched_images.get('landcover'))
         _draw_extent_labels(c, *bbox3, x, map_top3 - map_h, map_w, map_h)
     except Exception:
         c.setFillColor(GREY)
@@ -946,7 +1148,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     try:
         bbox4 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
                                        x, map_top4 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
-                                       fetch_soil_image_bytes)
+                                       fetch_soil_image_bytes,
+                                       img_bytes=prefetched_images.get('soil'))
         _draw_extent_labels(c, *bbox4, x, map_top4 - map_h, map_w, map_h)
     except Exception:
         c.setFillColor(GREY)
@@ -957,7 +1160,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     c.setFont('Helvetica-Oblique', 7)
     c.drawString(x, map_top4 - map_h - 5 * mm, 'Map 4 — dominant soil type, World Reference Base classification (ISRIC SoilGrids, 250m resolution).')
     y = map_top4 - map_h - 9 * mm
-    y = _draw_soil_legend(c, x, y, map_w)
+    y = _draw_soil_legend(c, x, y, map_w, legend_bytes=prefetched_images.get('soil_legend'))
     y -= 10 * mm
 
     # ---- Map 5: hydrologic soil group (SCS runoff class) ----
@@ -971,7 +1174,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     try:
         bbox5 = _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson,
                                        x, map_top5 - map_h, map_w, map_h, TEAL, TEAL_DARK, GOLD,
-                                       fetch_hsg_image_bytes)
+                                       fetch_hsg_image_bytes,
+                                       img_bytes=prefetched_images.get('hsg'))
         _draw_extent_labels(c, *bbox5, x, map_top5 - map_h, map_w, map_h)
     except Exception:
         c.setFillColor(GREY)
@@ -1144,7 +1348,7 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         t_vals = [pt['t_hr'] for pt in curve]
         u_vals = [pt['u'] for pt in curve]
         _draw_line_chart(c, x, y - chart_h, map_w, chart_h, t_vals, u_vals,
-                          'hours', '1/h', TEAL_DARK, 'Instantaneous unit hydrograph u(t)', GREY, DARK,
+                          'hours', 'u(t), 1/h', TEAL_DARK, 'Instantaneous unit hydrograph u(t)', GREY, DARK,
                           mark_x=g['tp_hr'])
         y -= (chart_h + 6 * mm)
 
@@ -1215,6 +1419,111 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(col2_x, y, val_str)
         y -= row_h
         row_i += 1
+
+    # ---- Relief, hypsometry & main-channel longitudinal profile ----
+    y -= 6 * mm
+    if y < margin + 70 * mm:
+        c.showPage()
+        y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Relief, hypsometry & main-channel profile')
+    y -= 8 * mm
+
+    relief_info = relief_info or {}
+    hyps = relief_info.get('hypsometry') or {'available': False}
+    prof = relief_info.get('profile') or {'available': False}
+
+    if hyps.get('available'):
+        stat_w = map_w / 3.0
+        stats = [('H — total relief (Zmax − Zmin)', f"{hyps['total_relief_m']:.0f} m"),
+                 ('Hypsometric integral (HI)', f"{hyps['hypsometric_integral']:.3f}"),
+                 ('Zmax / Zmean / Zmin', f"{hyps['z_max_m']:.0f} / {hyps['z_mean_m']:.0f} / {hyps['z_min_m']:.0f} m")]
+        for i, (label, val) in enumerate(stats):
+            sx = x + i * stat_w
+            c.setFillColor(TEAL_DARK)
+            c.setFont('Helvetica-Bold', 15)
+            c.drawString(sx, y - 6 * mm, val)
+            c.setFillColor(GREY)
+            c.setFont('Helvetica', 7.5)
+            c.drawString(sx, y - 10.5 * mm, label)
+        y -= 15 * mm
+
+        hi = hyps['hypsometric_integral']
+        stage = ('youthful — high remaining relief/erosion potential' if hi > 0.6
+                 else 'mature — basin near geomorphic equilibrium' if hi > 0.35
+                 else 'old age (peneplain-like) — most relief eroded away')
+        c.setFillColor(colors.black)
+        c.setFont('Helvetica-Oblique', 8)
+        c.drawString(x, y, f'Strahler (1952) stage reading: {stage}, from {hyps["n_points"]} elevation-sampled points inside the watershed.')
+        y -= 8 * mm
+
+        chart_h = 42 * mm
+        if y - chart_h < margin + 20 * mm:
+            c.showPage()
+            y = page_h - margin
+        curve = hyps.get('curve') or []
+        rel_area = [pt['rel_area'] for pt in curve]
+        rel_elev = [pt['rel_elev'] for pt in curve]
+        _draw_line_chart(c, x, y - chart_h, map_w, chart_h, rel_area, rel_elev,
+                          'a/A', 'h/H', GOLD, 'Hypsometric curve — relative area vs. relative elevation', GREY, DARK)
+        # note: both axes are dimensionless ratios in [0,1]; y_from_zero/x_from_zero
+        # defaults (both True) are the correct, meaningful baseline here.
+        y -= (chart_h + 8 * mm)
+    else:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawString(x, y, 'NA — could not sample enough elevation points across the watershed for relief/hypsometry.')
+        y -= 10 * mm
+
+    if prof.get('available'):
+        if y < margin + 55 * mm:
+            c.showPage()
+            y = page_h - margin
+        c.setFillColor(colors.black)
+        c.setFont('Helvetica', 8.5)
+        drop_m = prof['elev_headwater_m'] - prof['elev_outlet_m']
+        c.drawString(x, y, f"Main channel: {prof['total_length_km']:.2f} km, outlet {prof['elev_outlet_m']:.0f} m — "
+                            f"headwater {prof['elev_headwater_m']:.0f} m (drop {drop_m:.0f} m).")
+        y -= 8 * mm
+
+        chart_h = 42 * mm
+        if y - chart_h < margin:
+            c.showPage()
+            y = page_h - margin
+        pts = prof.get('points') or []
+        dist_vals = [p['dist_km'] for p in pts]
+        elev_vals = [p['elev_m'] for p in pts]
+        _draw_line_chart(c, x, y - chart_h, map_w, chart_h, dist_vals, elev_vals,
+                          'km from outlet', 'elev (m)', TEAL_DARK, 'Main-channel longitudinal profile', GREY, DARK,
+                          y_from_zero=False)
+        y -= (chart_h + 6 * mm)
+    else:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawString(x, y, 'NA — could not trace/sample the main channel for a longitudinal profile.')
+        y -= 10 * mm
+
+    relief_note = (
+        'Hypsometry samples elevation on the same watershed-interior grid used for the composite curve number, via '
+        'OpenTopoData (SRTM 90m). The hypsometric integral is the area under the relative-elevation vs. relative-area '
+        'curve (trapezoidal integration), equivalently (Zmean − Zmin) / (Zmax − Zmin) — Pike & Wilson (1971). '
+        'The main channel is traced from the outlet by following, at each confluence, the tributary with the greater '
+        'cumulative upstream stream length (the same reach topology reconstructed for the GIUH above), then resampled '
+        'to 30 points along its length for elevation lookup. Both are grid/point-sample estimates, not a full DEM zonal '
+        'computation — treat the exact integral and profile shape as indicative.'
+    )
+    c.setFont('Helvetica-Oblique', 7)
+    c.setFillColor(GREY)
+    for line in simpleSplit(relief_note, 'Helvetica-Oblique', 7, map_w):
+        if y < margin + 8 * mm:
+            c.showPage()
+            y = page_h - margin
+            c.setFont('Helvetica-Oblique', 7)
+            c.setFillColor(GREY)
+        c.drawString(x, y, line)
+        y -= 3.4 * mm
+    y -= 6 * mm
 
     # ---- Meteorology & environmental context (best-effort, NA when unavailable) ----
     y -= 6 * mm
@@ -1363,7 +1672,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     var_note = simpleSplit(
         'A = drainage area (km2); P = perimeter (km); L = basin length, LΩ = main (highest-order) stream length (km); '
         'Lstream = total stream length (km); N = number of stream segments; S = basin slope (m/m); Tc = time of '
-        'concentration (min); phi/lambda = latitude/longitude (radians); R = Earth radius.',
+        'concentration (min); Zmax/Zmean/Zmin = maximum/mean/minimum sampled elevation (m); '
+        'phi/lambda = latitude/longitude (radians); R = Earth radius.',
         'Helvetica', 7.5, map_w)
     for line in var_note:
         c.drawString(x, y, line)
@@ -1423,6 +1733,13 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
     eq_line('Stream frequency:  F_{s} = N / A')
     eq_line('Length of overland flow:  L_{g} = 1 / (2 D_{d})')
     y -= 2 * mm
+
+    eq_heading('Relief and hypsometry')
+    eq_line('Total relief:  H = Z_{max} − Z_{min}')
+    eq_line('Hypsometric integral:  HI = area under the (h/H) vs. (a/A) curve   =   (Z_{mean} − Z_{min}) / (Z_{max} − Z_{min})', size=11)
+    eq_note('Zmax/Zmean/Zmin from elevation-sampled points across the watershed; h/H = relative elevation, a/A = '
+            'relative area above that elevation (the plotted hypsometric curve). The integral (computed here by '
+            'trapezoidal integration of the sampled curve) equals the elevation-relief ratio — Pike & Wilson (1971).')
 
     eq_heading('Time of concentration (Kirpich, 1940) and lag time')
     eq_line('T_{c} = 0.0195 · L^{0.77} · S^{-0.385}    (minutes)')
@@ -1989,14 +2306,18 @@ def fetch_landcover_soil_labels(lat, lng):
 
 
 def _draw_wms_overlay_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h,
-                           teal, teal_dark, gold, fetch_fn):
-    """Watershed overlay drawn on top of a fetched WMS raster (land cover or
-    soil type). Raises on any failure so the caller can show a fallback."""
+                           teal, teal_dark, gold, fetch_fn, img_bytes=None):
+    """Watershed overlay drawn on top of a WMS raster (land cover or soil
+    type). Pass `img_bytes` if it was already fetched (e.g. concurrently,
+    up front in build_pdf_report) to skip fetching again; otherwise it's
+    fetched here via `fetch_fn`. Raises on any failure so the caller can
+    show a fallback."""
     from reportlab.lib.utils import ImageReader
     from reportlab.lib import colors
 
     min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson, pad_frac=0.18)
-    img_bytes = fetch_fn(min_lon, max_lon, min_lat, max_lat, width_px=900)
+    if img_bytes is None:
+        img_bytes = fetch_fn(min_lon, max_lon, min_lat, max_lat, width_px=900)
     if not img_bytes:
         raise ValueError('layer imagery unavailable')
 
@@ -2041,15 +2362,18 @@ def _draw_landcover_legend(c, x0, y0, w):
     return _draw_swatch_legend(c, x0, y0, w, entries)
 
 
-def _draw_soil_legend(c, x0, y0, w):
+def _draw_soil_legend(c, x0, y0, w, legend_bytes=None):
     """Soil-type legend: embeds ISRIC's own GetLegendGraphic image (the
-    authoritative color key for the ~30 WRB classes) under the map. Falls
-    back to a short text note if the legend image can't be fetched."""
+    authoritative color key for the ~30 WRB classes) under the map. Pass
+    `legend_bytes` if it was already fetched up front; otherwise it's
+    fetched here. Falls back to a short text note if the legend image
+    can't be fetched."""
     from reportlab.lib.utils import ImageReader
     from reportlab.lib import colors as rl_colors
     from reportlab.lib.units import mm
     try:
-        legend_bytes = fetch_soil_legend_bytes()
+        if legend_bytes is None:
+            legend_bytes = fetch_soil_legend_bytes()
         if not legend_bytes:
             raise ValueError('no legend image')
         img = ImageReader(io.BytesIO(legend_bytes))
@@ -2088,14 +2412,16 @@ def _draw_hsg_legend(c, x0, y0, w):
     return _draw_swatch_legend(c, x0, y0, w, entries)
 
 
-def _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold):
-    """Watershed overlay drawn on top of a fetched satellite image. Raises on
-    any failure (missing geometry or unreachable imagery service) so the
+def _draw_satellite_map(c, watershed_geojson, rivers_geojson, outlets_geojson, x0, y0, w, h, teal, teal_dark, gold, img_bytes=None):
+    """Watershed overlay drawn on top of a satellite image. Pass `img_bytes`
+    if it was already fetched up front; otherwise it's fetched here. Raises
+    on any failure (missing geometry or unreachable imagery service) so the
     caller can show a fallback message instead."""
     from reportlab.lib.utils import ImageReader
 
     min_lon, max_lon, min_lat, max_lat = _compute_watershed_bbox(watershed_geojson, pad_frac=0.18)
-    img_bytes = fetch_satellite_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900)
+    if img_bytes is None:
+        img_bytes = fetch_satellite_image_bytes(min_lon, max_lon, min_lat, max_lat, width_px=900)
     if not img_bytes:
         raise ValueError('satellite imagery unavailable')
 
@@ -2233,11 +2559,72 @@ def _draw_formula(c, x, y, s, size=11.5, color=None):
             i = j
 
 
-def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color, title, grey, dark, mark_x=None):
+def _nice_num(range_val, round_result):
+    """Classic 'nice numbers' axis helper (Heckbert). Snaps a raw span or
+    step to a visually clean 1/2/5x10^n value."""
+    if range_val <= 0:
+        return 1.0
+    exponent = math.floor(math.log10(range_val))
+    fraction = range_val / (10 ** exponent)
+    if round_result:
+        if fraction < 1.5:
+            nice_fraction = 1.0
+        elif fraction < 3:
+            nice_fraction = 2.0
+        elif fraction < 7:
+            nice_fraction = 5.0
+        else:
+            nice_fraction = 10.0
+    else:
+        if fraction <= 1:
+            nice_fraction = 1.0
+        elif fraction <= 2:
+            nice_fraction = 2.0
+        elif fraction <= 5:
+            nice_fraction = 5.0
+        else:
+            nice_fraction = 10.0
+    return nice_fraction * (10 ** exponent)
+
+
+def _nice_ticks(vmin, vmax, target_n=5):
+    """Returns (ticks, nice_min, nice_max) — evenly spaced, human-friendly
+    axis tick values that bracket [vmin, vmax]."""
+    if vmin is None or vmax is None:
+        vmin, vmax = 0.0, 1.0
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+    span = _nice_num(vmax - vmin, False)
+    step = _nice_num(span / max(target_n - 1, 1), True)
+    nice_min = math.floor(vmin / step) * step
+    nice_max = math.ceil(vmax / step) * step
+    ticks = []
+    v = nice_min
+    guard = 0
+    while v <= nice_max + step * 0.5 and guard < 50:
+        ticks.append(round(v, 10))
+        v += step
+        guard += 1
+    return ticks, nice_min, nice_max
+
+
+def _fmt_tick(v):
+    if abs(v - round(v)) < 1e-6:
+        return f'{int(round(v)):,}'
+    return f'{v:,.2f}'
+
+
+def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color, title, grey, dark,
+                      mark_x=None, y_from_zero=True, x_from_zero=True):
     """A minimal, dependency-free x/y line chart drawn straight onto the
     reportlab canvas, styled consistently with _draw_bar_chart. Used for the
-    GIUH curve (t in hours vs. u(t) in 1/h). `mark_x`, if given, draws a thin
-    vertical guide (e.g. at the peak time)."""
+    GIUH curve, the hypsometric curve, and the main-channel elevation profile.
+    Draws a real labeled y-axis (tick values + horizontal gridlines) and
+    labeled x-axis ticks. `mark_x`, if given, draws a thin vertical guide
+    (e.g. at the peak time). Set `y_from_zero=False` for charts (like an
+    elevation profile) where forcing the axis to 0 would waste vertical
+    space and compress the visible variation — the axis then starts near
+    the data minimum instead."""
     from reportlab.lib import colors as rl_colors
 
     c.setFillColor(dark)
@@ -2251,31 +2638,83 @@ def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color
         c.drawString(x0, y0 + h / 2, 'No data available')
         return
 
-    axis_label_h = 10
-    plot_top = y0 + h - 16
-    plot_bottom = y0 + axis_label_h
+    numeric_y = [v for v in y_vals if v is not None]
+    data_y_min = min(numeric_y) if numeric_y else 0.0
+    data_y_max = max(numeric_y) if numeric_y else 1.0
+    data_x_min = min(x_vals)
+    data_x_max = max(x_vals)
+
+    y_ticks, y_min, y_max = _nice_ticks(0.0 if y_from_zero else data_y_min, data_y_max, target_n=5)
+    x_ticks, x_min, x_max = _nice_ticks(0.0 if x_from_zero else data_x_min, data_x_max, target_n=6)
+    if y_max <= y_min:
+        y_max = y_min + 1.0
+    if x_max <= x_min:
+        x_max = x_min + 1.0
+
+    # reserve left margin for the widest y tick label, plus a column for the
+    # rotated y-axis unit label
+    c.setFont('Helvetica', 6.5)
+    y_label_w = max((c.stringWidth(_fmt_tick(t), 'Helvetica', 6.5) for t in y_ticks), default=10)
+    unit_col_w = 9
+
+    title_h = 14
+    x_axis_h = 26
+    plot_top = y0 + h - title_h
+    plot_bottom = y0 + x_axis_h
     plot_h = max(plot_top - plot_bottom, 1)
-    plot_left = x0 + 2
+    plot_left = x0 + unit_col_w + y_label_w + 8
     plot_right = x0 + w - 2
     plot_w = max(plot_right - plot_left, 1)
 
-    x_max = max(x_vals) or 1
-    numeric_y = [v for v in y_vals if v is not None]
-    y_max = max(numeric_y) if numeric_y else 1
-    if y_max <= 0:
-        y_max = 1
-
     def px(xv):
-        return plot_left + (xv / x_max) * plot_w
+        return plot_left + ((xv - x_min) / (x_max - x_min)) * plot_w
 
     def py(yv):
-        return plot_bottom + (yv / y_max) * plot_h
+        return plot_bottom + ((yv - y_min) / (y_max - y_min)) * plot_h
 
-    c.setStrokeColor(rl_colors.HexColor('#cccccc'))
-    c.setLineWidth(0.6)
+    # horizontal gridlines + y tick labels
+    c.setFont('Helvetica', 6.5)
+    for t in y_ticks:
+        ty = py(t)
+        if ty < plot_bottom - 0.5 or ty > plot_top + 0.5:
+            continue
+        c.setStrokeColor(rl_colors.HexColor('#e3e3e3'))
+        c.setLineWidth(0.5)
+        c.line(plot_left, ty, plot_right, ty)
+        c.setFillColor(grey)
+        c.drawRightString(plot_left - 4, ty - 2, _fmt_tick(t))
+
+    # y-axis line
+    c.setStrokeColor(rl_colors.HexColor('#999999'))
+    c.setLineWidth(0.8)
+    c.line(plot_left, plot_bottom, plot_left, plot_top)
+    # x-axis line
     c.line(plot_left, plot_bottom, plot_right, plot_bottom)
 
-    if mark_x is not None and 0 < mark_x <= x_max:
+    # x tick marks + labels
+    c.setFont('Helvetica', 6.5)
+    for t in x_ticks:
+        if t < x_min - 1e-9 or t > x_max + 1e-9:
+            continue
+        tx = px(t)
+        c.setStrokeColor(rl_colors.HexColor('#999999'))
+        c.setLineWidth(0.6)
+        c.line(tx, plot_bottom, tx, plot_bottom - 2.5)
+        c.setFillColor(grey)
+        c.drawCentredString(tx, plot_bottom - 10, _fmt_tick(t))
+
+    # axis unit labels: x unit centered on its own row below the tick values;
+    # y unit rotated vertically in the reserved left column
+    c.setFillColor(grey)
+    c.setFont('Helvetica-Oblique', 6.5)
+    c.drawCentredString((plot_left + plot_right) / 2.0, y0 + 2, x_unit)
+    c.saveState()
+    c.translate(x0 + unit_col_w / 2.0 + 2, (plot_top + plot_bottom) / 2.0)
+    c.rotate(90)
+    c.drawCentredString(0, 0, y_unit)
+    c.restoreState()
+
+    if mark_x is not None and x_min <= mark_x <= x_max:
         c.setStrokeColor(rl_colors.HexColor('#c9982f'))
         c.setLineWidth(0.7)
         c.setDash(2, 2)
@@ -2283,11 +2722,12 @@ def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color
         c.setDash()
 
     # filled area under the curve, then the stroked line on top
+    baseline_y = py(y_min)
     path = c.beginPath()
-    path.moveTo(px(x_vals[0]), plot_bottom)
+    path.moveTo(px(x_vals[0]), baseline_y)
     for xv, yv in zip(x_vals, y_vals):
-        path.lineTo(px(xv), py(yv if yv is not None else 0))
-    path.lineTo(px(x_vals[-1]), plot_bottom)
+        path.lineTo(px(xv), py(yv if yv is not None else y_min))
+    path.lineTo(px(x_vals[-1]), baseline_y)
     path.close()
     fill_color = rl_colors.Color(line_color.red, line_color.green, line_color.blue, alpha=0.15)
     c.setFillColor(fill_color)
@@ -2296,16 +2736,10 @@ def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color
     c.setStrokeColor(line_color)
     c.setLineWidth(1.3)
     line_path = c.beginPath()
-    line_path.moveTo(px(x_vals[0]), py(y_vals[0] if y_vals[0] is not None else 0))
+    line_path.moveTo(px(x_vals[0]), py(y_vals[0] if y_vals[0] is not None else y_min))
     for xv, yv in zip(x_vals[1:], y_vals[1:]):
-        line_path.lineTo(px(xv), py(yv if yv is not None else 0))
+        line_path.lineTo(px(xv), py(yv if yv is not None else y_min))
     c.drawPath(line_path, fill=0, stroke=1)
-
-    c.setFillColor(grey)
-    c.setFont('Helvetica', 6.5)
-    c.drawString(plot_left, y0, f'0 {x_unit}')
-    c.drawRightString(plot_right, y0, f'{x_max:g} {x_unit}')
-    c.drawString(plot_left, plot_top + 2, f'max {y_max:g} {y_unit}')
 
 
 # ---------- routes ----------
@@ -2401,10 +2835,11 @@ def report():
         # Run the geocoding lookup and the environmental-data lookups concurrently —
         # they're independent, unrelated web requests, so there's no reason to
         # wait on one before starting the others.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
             f_geo = ex.submit(reverse_geocode, lat, lng)
             f_env = ex.submit(fetch_environmental_context, lat, lng)
             f_cn = ex.submit(compute_composite_cn, watershed_geojson)
+            f_relief = ex.submit(compute_relief_hypsometry_and_profile, watershed_geojson, rivers_geojson, lat, lng)
             try:
                 geo_info = f_geo.result(timeout=15)
             except Exception:
@@ -2417,6 +2852,10 @@ def report():
                 cn_info = f_cn.result(timeout=25)
             except Exception:
                 cn_info = None
+            try:
+                relief_info = f_relief.result(timeout=25)
+            except Exception:
+                relief_info = None
 
         wiki_title = geo_info.get('place') or geo_info.get('region')
         wiki_info = wikipedia_summary(wiki_title)
@@ -2434,7 +2873,7 @@ def report():
             giuh_info = None
 
         pdf_bytes = build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson,
-                                      morphology, geo_info, wiki_info, env_info, cn_info, giuh_info)
+                                      morphology, geo_info, wiki_info, env_info, cn_info, giuh_info, relief_info)
 
         filename = f"manabi_watershed_report_{lat:.4f}_{lng:.4f}.pdf"
         return Response(
