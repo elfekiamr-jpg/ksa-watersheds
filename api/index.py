@@ -1347,6 +1347,109 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(x, max(y, margin),
                      'Source: Open-Meteo historical archive (open-meteo.com), ERA5-based reanalysis. Wind speed/direction: daily maximum, monthly-averaged.')
 
+    # ---- Equations reference (appendix): every derived quantity above, as computed ----
+    c.showPage()
+    y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Equations reference')
+    y -= 6 * mm
+    c.setFont('Helvetica-Oblique', 8)
+    c.setFillColor(GREY)
+    c.drawString(x, y, 'Every derived quantity in this report, as computed — not reconstructed from a textbook.')
+    y -= 5 * mm
+    c.setFont('Helvetica', 7.5)
+    c.setFillColor(colors.HexColor('#333333'))
+    var_note = simpleSplit(
+        'A = drainage area (km2); P = perimeter (km); L = basin length, LΩ = main (highest-order) stream length (km); '
+        'Lstream = total stream length (km); N = number of stream segments; S = basin slope (m/m); Tc = time of '
+        'concentration (min); phi/lambda = latitude/longitude (radians); R = Earth radius.',
+        'Helvetica', 7.5, map_w)
+    for line in var_note:
+        c.drawString(x, y, line)
+        y -= 3.4 * mm
+    y -= 6 * mm
+
+    def eq_heading(txt):
+        nonlocal y
+        if y < margin + 16 * mm:
+            c.showPage()
+            y = page_h - margin
+        c.setFillColor(DARK)
+        c.setFont('Helvetica-Bold', 9.5)
+        c.drawString(x, y, txt)
+        y -= 5.5 * mm
+
+    def eq_line(txt, size=11.5):
+        nonlocal y
+        if y < margin + 10 * mm:
+            c.showPage()
+            y = page_h - margin
+        _draw_formula(c, x + 4 * mm, y, txt, size=size)
+        y -= (size / 72.0 * 72 * 0.62) + 5.5
+
+    def eq_note(txt):
+        nonlocal y
+        c.setFont('Helvetica', 7.5)
+        c.setFillColor(colors.HexColor('#333333'))
+        for line in simpleSplit(txt, 'Helvetica', 7.5, map_w):
+            if y < margin + 8 * mm:
+                c.showPage()
+                y = page_h - margin
+                c.setFont('Helvetica', 7.5)
+                c.setFillColor(colors.HexColor('#333333'))
+            c.drawString(x, y, line)
+            y -= 3.4 * mm
+        y -= 4 * mm
+
+    eq_heading('Distance between two points (haversine) — underlies every length in this report')
+    eq_line('a = sin^{2}(dphi / 2) + cos(phi_{1}) · cos(phi_{2}) · sin^{2}(dlambda / 2)')
+    eq_line('d = 2R · arcsin(√a)')
+    y -= 2 * mm
+
+    eq_heading('Watershed area (shoelace formula, local equirectangular projection)')
+    eq_line('A = ½ |Σ (x_{i} y_{i+1} − x_{i+1} y_{i})|')
+    y -= 2 * mm
+
+    eq_heading('Morphological shape indices')
+    eq_line('Form factor:  F_{f} = A / L^{2}')
+    eq_line('Circularity ratio:  R_{c} = 4πA / P^{2}')
+    eq_line('Elongation ratio:  R_{e} = (2 / L) · √(A / π)')
+    eq_line('Compactness coefficient:  C_{c} = 0.2821 · P / √A')
+    y -= 2 * mm
+
+    eq_heading('Drainage network')
+    eq_line('Drainage density:  D_{d} = L_{stream} / A')
+    eq_line('Stream frequency:  F_{s} = N / A')
+    eq_line('Length of overland flow:  L_{g} = 1 / (2 D_{d})')
+    y -= 2 * mm
+
+    eq_heading('Time of concentration (Kirpich, 1940) and lag time')
+    eq_line('T_{c} = 0.0195 · L^{0.77} · S^{-0.385}    (minutes)')
+    eq_line('Lag time = 0.6 · T_{c}')
+    y -= 2 * mm
+
+    eq_heading('Composite curve number (SCS/NRCS)')
+    eq_line('CN_{composite} = Σ (CN_{i} · n_{i}) / Σ n_{i}', size=12.5)
+    eq_note('n(i) = number of sampled points inside the watershed classified with curve number CN(i) '
+            '(from the land-cover / hydrologic-soil-group pair at that point).')
+
+    eq_heading('Geomorphological Instantaneous Unit Hydrograph (GIUH) — Horton ratios')
+    eq_line('R_{B} = geometric mean of (N_{ω} / N_{ω+1})   — bifurcation ratio')
+    eq_line('R_{L} = geometric mean of (L_{ω+1} / L_{ω})   — length ratio')
+    eq_line('R_{A} = geometric mean of (A_{ω+1} / A_{ω})   — area ratio')
+    eq_note('ω = Strahler stream order (1 … Ω, the outlet’s order); Nω = number of streams of order ω; '
+            'Lω = their mean length; Aω = their mean upstream drainage area (see the GIUH note above for how '
+            'Aω is estimated when no per-order sub-basin polygon is available).')
+
+    eq_heading('GIUH — Rosso (1984) two-parameter gamma instantaneous unit hydrograph')
+    eq_line('n = 3.29 · (R_{B}/R_{A})^{0.78} · R_{L}^{0.07}     — shape parameter', size=12.5)
+    eq_line('k = 0.70 · (R_{B}/R_{A})^{-0.48} · R_{L}^{0.48} · (L_{Ω} / V)     — scale parameter (hours)', size=12.5)
+    eq_line('t_{p} = (n − 1) · k     — time to peak')
+    eq_line('u(t) = [1 / (k · Γ(n))] · (t/k)^{n−1} · e^{−t/k}     — the plotted hydrograph ordinate')
+    eq_note('V = characteristic channel velocity, back-calculated as LΩ / Tc so no additional empirical '
+            'constant is introduced beyond what this report already computes. Γ(n) is the gamma function.')
+
     # ---- Footer ----
     c.setFont('Helvetica-Oblique', 7)
     c.setFillColor(GREY)
@@ -2093,6 +2196,41 @@ def _draw_bar_chart(c, x0, y0, w, h, months, values, unit, bar_color, title, gre
     c.setFillColor(grey)
     c.setFont('Helvetica', 6.5)
     c.drawString(x0, plot_top + 2, f'max {max_val:g} {unit}'.strip())
+
+
+def _draw_formula(c, x, y, s, size=11.5, color=None):
+    """Draws one inline formula at (x, y) with real typographic super/subscripts
+    instead of unicode super/subscript glyphs (which render as blank gaps in
+    this PDF's base Helvetica encoding — verified separately; plain Greek
+    letters, radicals, minus signs etc. do render fine and are used directly).
+    Syntax: ^{...} for superscript, _{...} for subscript; everything else is
+    drawn literally. Does not touch `y` — the caller advances it."""
+    base_font = 'Helvetica'
+    sub_size = size * 0.68
+    if color:
+        c.setFillColor(color)
+    xi = x
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch in ('^', '_') and i + 1 < n and s[i + 1] == '{':
+            close = s.find('}', i + 2)
+            token = s[i + 2:close] if close != -1 else s[i + 2:]
+            is_sup = ch == '^'
+            c.setFont(base_font, sub_size)
+            dy = (size * 0.32) if is_sup else (-size * 0.14)
+            c.drawString(xi, y + dy, token)
+            xi += c.stringWidth(token, base_font, sub_size)
+            i = (close + 1) if close != -1 else n
+        else:
+            j = i
+            while j < n and s[j] not in ('^', '_'):
+                j += 1
+            chunk = s[i:j]
+            c.setFont(base_font, size)
+            c.drawString(xi, y, chunk)
+            xi += c.stringWidth(chunk, base_font, size)
+            i = j
 
 
 def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color, title, grey, dark, mark_x=None):
