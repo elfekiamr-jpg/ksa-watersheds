@@ -7,6 +7,7 @@ import math
 import io
 import datetime
 import concurrent.futures
+from collections import defaultdict, deque
 
 app = Flask(__name__)
 CORS(app)
@@ -180,6 +181,263 @@ def compute_morphology_lite(watershed_geojson, rivers_geojson, outlet_lat, outle
     except Exception:
         pass
 
+    return result
+
+
+# ---------- Geomorphological Instantaneous Unit Hydrograph (GIUH) ----------
+#
+# Rodriguez-Iturbe & Valdes (1979): the IUH shape can be derived entirely from
+# a basin's Horton ratios (bifurcation RB, length RL, area RA), with no
+# calibration against an observed hydrograph. We use the Rosso (1984) closed
+# form, which expresses the IUH as a two-parameter gamma density.
+#
+# Data available: each MERIT-Basins reach returned by mghydro's
+# upstream_rivers_api already carries a Strahler stream order ('sorder'), so
+# Nw (stream count) and Lw (mean length) per order come directly from
+# grouping the returned segments — no network topology needs to be inferred
+# for those two ratios.
+#
+# RA (area ratio) is the one ratio that normally requires a sub-basin polygon
+# per stream order, which isn't available here. We approximate it in two
+# steps: (1) reconstruct the upstream/downstream topology of the reach
+# network purely from shared endpoint coordinates, rooted at the outlet
+# (MERIT reach lines are not guaranteed to be given upstream to downstream,
+# and carry no explicit up/downstream reach id); (2) estimate the drainage
+# area upstream of each reach as (cumulative upstream stream length) /
+# (basin-average drainage density) — a standard estimator for basins with
+# roughly uniform drainage density, avoiding extra delineation calls per
+# reach. This is an approximation, not a true zonal computation, and is
+# reported as such.
+
+def _round_node(pt, tol=5):
+    """Snap a line endpoint to a fixed precision so two segments that share a
+    confluence (but were digitized independently) land on the same node key."""
+    return (round(pt[0], tol), round(pt[1], tol))
+
+
+def _extract_river_segments(rivers_geojson):
+    """Flattens the rivers GeoJSON into a list of segment dicts carrying the
+    raw coordinates, Strahler order, and length — the same flattening
+    rivers_metrics() does, but keeping order/geometry instead of collapsing
+    straight to totals."""
+    segs = []
+    if not rivers_geojson or 'features' not in rivers_geojson:
+        return segs
+    for feat in rivers_geojson['features']:
+        geom = feat.get('geometry') or {}
+        props = feat.get('properties') or {}
+        gtype = geom.get('type')
+        lines = []
+        if gtype == 'LineString':
+            lines = [geom.get('coordinates', [])]
+        elif gtype == 'MultiLineString':
+            lines = geom.get('coordinates', [])
+        sorder = props.get('sorder')
+        try:
+            sorder = int(sorder) if sorder is not None else None
+        except (TypeError, ValueError):
+            sorder = None
+        for line in lines:
+            if len(line) < 2:
+                continue
+            segs.append({
+                'coords': line,
+                'sorder': sorder,
+                'length_km': line_length_km(line),
+            })
+    return segs
+
+
+def _resolve_river_topology(segments, outlet_lat, outlet_lng):
+    """Roots the (undirected) endpoint graph at the node nearest the outlet
+    and BFS's outward, labelling each segment's downstream/upstream endpoint.
+    Mutates and returns `segments`; a segment the BFS never reaches (a
+    disconnected fragment from an endpoint-snapping mismatch) is left with
+    resolved=False and is excluded from the cumulative-length pass but still
+    counted toward Nw/Lw."""
+    node_segs = defaultdict(list)
+    for i, seg in enumerate(segments):
+        a = _round_node(seg['coords'][0])
+        b = _round_node(seg['coords'][-1])
+        seg['node_a'], seg['node_b'] = a, b
+        seg['resolved'] = False
+        node_segs[a].append(i)
+        node_segs[b].append(i)
+
+    if not segments:
+        return segments
+
+    outlet_pt = (float(outlet_lng), float(outlet_lat))
+    root = min(node_segs.keys(), key=lambda n: (n[0] - outlet_pt[0]) ** 2 + (n[1] - outlet_pt[1]) ** 2)
+
+    visited_nodes = {root}
+    visited_segs = set()
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        for si in node_segs[node]:
+            if si in visited_segs:
+                continue
+            seg = segments[si]
+            a, b = seg['node_a'], seg['node_b']
+            downstream_node = node
+            upstream_node = b if a == node else a
+            seg['downstream_node'] = downstream_node
+            seg['upstream_node'] = upstream_node
+            seg['resolved'] = True
+            visited_segs.add(si)
+            if upstream_node not in visited_nodes:
+                visited_nodes.add(upstream_node)
+                queue.append(upstream_node)
+
+    return segments
+
+
+def _cumulative_upstream_lengths_km(segments):
+    """For each resolved segment, its own length plus the length of every
+    segment upstream of it (its whole upstream subtree). Returns a dict
+    keyed by segment index."""
+    children = defaultdict(list)
+    for i, seg in enumerate(segments):
+        if seg.get('resolved'):
+            children[seg['downstream_node']].append(i)
+
+    memo = {}
+
+    def cum(i):
+        if i in memo:
+            return memo[i]
+        seg = segments[i]
+        total = seg['length_km']
+        for j in children.get(seg['upstream_node'], []):
+            if j != i:
+                total += cum(j)
+        memo[i] = total
+        return total
+
+    for i, seg in enumerate(segments):
+        if seg.get('resolved'):
+            cum(i)
+    return memo
+
+
+def _geometric_mean_step_ratio(values_by_order, orders, invert=False):
+    """Geometric mean of values[order+1]/values[order] across consecutive
+    orders present in both. invert=True is for stream counts, which
+    decrease with order (Horton's RB is conventionally Nw/Nw+1 > 1)."""
+    ratios = []
+    for o in orders[:-1]:
+        v0, v1 = values_by_order.get(o), values_by_order.get(o + 1)
+        if v0 and v1 and v0 > 0:
+            ratios.append(v1 / v0)
+    if not ratios:
+        return None
+    product = 1.0
+    for r in ratios:
+        product *= r
+    gm = product ** (1.0 / len(ratios))
+    return (1.0 / gm) if invert else gm
+
+
+def compute_giuh(rivers_geojson, outlet_lat, outlet_lng, area_km2, drainage_density,
+                  main_stream_length_km, tc_minutes):
+    """Geomorphological Instantaneous Unit Hydrograph via Rodriguez-Iturbe &
+    Valdes (1979) / Rosso (1984). Returns {'available': False} if the reach
+    network doesn't carry enough distinct stream orders, or a dict with the
+    Horton ratios, the gamma-IUH parameters, and a plotted (t, u) curve."""
+    result = {'available': False}
+    if not rivers_geojson or not area_km2 or not drainage_density or not tc_minutes:
+        return result
+
+    segments = _extract_river_segments(rivers_geojson)
+    segments = _resolve_river_topology(segments, outlet_lat, outlet_lng)
+
+    by_order = defaultdict(list)
+    for i, seg in enumerate(segments):
+        if seg['sorder']:
+            by_order[seg['sorder']].append(i)
+    orders = sorted(by_order.keys())
+    if len(orders) < 2:
+        return result
+    omega = orders[-1]
+
+    N = {o: len(by_order[o]) for o in orders}
+    L = {o: sum(segments[i]['length_km'] for i in by_order[o]) / len(by_order[o]) for o in orders}
+
+    cum_lengths = _cumulative_upstream_lengths_km(segments)
+    A = {}
+    for o in orders:
+        idxs = [i for i in by_order[o] if segments[i].get('resolved')]
+        if idxs:
+            A[o] = (sum(cum_lengths[i] for i in idxs) / len(idxs)) / drainage_density
+    # Fall back on the basin-scale estimate at the two ends if the endpoint-
+    # matching topology reconstruction left them without resolved segments.
+    if omega not in A:
+        A[omega] = area_km2
+    if orders[0] not in A and N.get(orders[0]):
+        A[orders[0]] = area_km2 / N[orders[0]]
+
+    RB = _geometric_mean_step_ratio(N, orders, invert=True)
+    RL = _geometric_mean_step_ratio(L, orders, invert=False)
+    RA = _geometric_mean_step_ratio(A, orders, invert=False)
+
+    if not RB or not RL or not RA or RB <= 1 or RL <= 1 or RA <= 1:
+        return result
+
+    L_omega = L.get(omega) or main_stream_length_km
+    if not L_omega:
+        return result
+
+    # Characteristic channel velocity backed out from the basin's own Kirpich
+    # time of concentration (V = L_omega / Tc), so no new empirical constant
+    # is introduced beyond what Manabi already computes.
+    tc_hr = tc_minutes / 60.0
+    if tc_hr <= 0:
+        return result
+    V_kmh = L_omega / tc_hr
+    if V_kmh <= 0:
+        return result
+
+    n_shape = 3.29 * ((RB / RA) ** 0.78) * (RL ** 0.07)
+    k_scale_hr = 0.70 * ((RB / RA) ** -0.48) * (RL ** 0.48) * (L_omega / V_kmh)
+
+    if n_shape <= 1 or k_scale_hr <= 0:
+        return result
+
+    tp_hr = (n_shape - 1) * k_scale_hr
+
+    def u(t_hr):
+        if t_hr <= 0:
+            return 0.0
+        return ((1.0 / (k_scale_hr * math.gamma(n_shape)))
+                * ((t_hr / k_scale_hr) ** (n_shape - 1))
+                * math.exp(-t_hr / k_scale_hr))
+
+    qp = u(tp_hr)
+    t_max = max(tp_hr * 5.0, k_scale_hr * (n_shape + 4 * math.sqrt(n_shape)))
+    n_points = 60
+    curve = [{'t_hr': round(t_max * i / n_points, 3), 'u': u(t_max * i / n_points)}
+             for i in range(n_points + 1)]
+
+    result.update({
+        'available': True,
+        'omega': omega,
+        'orders': orders,
+        'N': N,
+        'L_km': {o: round(v, 3) for o, v in L.items()},
+        'A_km2': {o: round(v, 2) for o, v in A.items()},
+        'RB': round(RB, 3),
+        'RL': round(RL, 3),
+        'RA': round(RA, 3),
+        'main_stream_length_km': round(L_omega, 2),
+        'velocity_km_per_hr': round(V_kmh, 3),
+        'n_shape': round(n_shape, 3),
+        'k_scale_hr': round(k_scale_hr, 3),
+        'tp_hr': round(tp_hr, 3),
+        'tp_min': round(tp_hr * 60.0, 1),
+        'qp_per_hr': round(qp, 5),
+        'curve': curve,
+    })
     return result
 
 
@@ -530,7 +788,7 @@ ENV_LABELS = [
 ]
 
 
-def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None, cn_info=None):
+def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson, morphology, geo_info, wiki_info, env_info=None, cn_info=None, giuh_info=None):
     """Builds the PDF entirely with reportlab vector drawing (no external map-tile/image
     dependency, so it stays reliable on Vercel's serverless Python runtime)."""
     from reportlab.lib.pagesizes import A4
@@ -837,6 +1095,86 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(x, y, line)
         y -= 3.4 * mm
     y -= 8 * mm
+
+    # ---- Geomorphological Instantaneous Unit Hydrograph (GIUH) ----
+    if y < margin + 70 * mm:
+        c.showPage()
+        y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Geomorphological Instantaneous Unit Hydrograph (GIUH)')
+    y -= 6 * mm
+    c.setFont('Helvetica-Oblique', 8)
+    c.setFillColor(GREY)
+    c.drawString(x, y, 'Rodriguez-Iturbe & Valdes (1979) / Rosso (1984) — the IUH shape derived from the basin\'s own stream network, no calibration.')
+    y -= 8 * mm
+
+    if giuh_info and giuh_info.get('available'):
+        g = giuh_info
+        # Horton ratios, as a compact 3-up stat row
+        stat_w = map_w / 3.0
+        stats = [('RB — bifurcation ratio', f"{g['RB']:.2f}"),
+                 ('RL — length ratio', f"{g['RL']:.2f}"),
+                 ('RA — area ratio', f"{g['RA']:.2f}")]
+        for i, (label, val) in enumerate(stats):
+            sx = x + i * stat_w
+            c.setFillColor(TEAL_DARK)
+            c.setFont('Helvetica-Bold', 18)
+            c.drawString(sx, y - 6 * mm, val)
+            c.setFillColor(GREY)
+            c.setFont('Helvetica', 7.5)
+            c.drawString(sx, y - 10.5 * mm, label)
+        y -= 16 * mm
+
+        c.setFillColor(colors.black)
+        c.setFont('Helvetica', 8.5)
+        c.drawString(x, y, f"Basin (Strahler) order Ω = {g['omega']}   ·   "
+                            f"main-stream length LΩ = {g['main_stream_length_km']:.2f} km   ·   "
+                            f"characteristic velocity V = {g['velocity_km_per_hr']:.2f} km/h")
+        y -= 5 * mm
+        c.drawString(x, y, f"Gamma-IUH shape n = {g['n_shape']:.2f}   ·   scale k = {g['k_scale_hr']:.2f} h   ·   "
+                            f"peak time tp = {g['tp_min']:.0f} min   ·   peak ordinate qp = {g['qp_per_hr']:.4f} /h")
+        y -= 9 * mm
+
+        chart_h = 42 * mm
+        if y - chart_h < margin + 20 * mm:
+            c.showPage()
+            y = page_h - margin
+        curve = g.get('curve') or []
+        t_vals = [pt['t_hr'] for pt in curve]
+        u_vals = [pt['u'] for pt in curve]
+        _draw_line_chart(c, x, y - chart_h, map_w, chart_h, t_vals, u_vals,
+                          'hours', '1/h', TEAL_DARK, 'Instantaneous unit hydrograph u(t)', GREY, DARK,
+                          mark_x=g['tp_hr'])
+        y -= (chart_h + 6 * mm)
+
+        giuh_note = (
+            'RB and RL come directly from the Strahler stream order carried on each delineated reach (grouped counts and mean '
+            'lengths per order). RA (area ratio) has no per-order sub-basin polygon available, so it is approximated by '
+            'reconstructing the reach network\'s upstream/downstream topology from shared endpoint coordinates and estimating '
+            'each order\'s mean upstream drainage area as (cumulative upstream stream length) / (basin-average drainage '
+            'density) — a standard estimator for basins with roughly uniform drainage density, not a true zonal computation. '
+            'The characteristic channel velocity V is back-calculated from the basin\'s own Kirpich time of concentration '
+            '(V = LΩ / Tc) so no additional empirical constant is introduced. Convolve u(t) with excess rainfall '
+            '(from the composite curve number above) to obtain a direct-runoff hydrograph for a design storm.'
+        )
+        c.setFont('Helvetica-Oblique', 7)
+        c.setFillColor(GREY)
+        giuh_note_lines = simpleSplit(giuh_note, 'Helvetica-Oblique', 7, map_w)
+        for line in giuh_note_lines:
+            if y < margin + 8 * mm:
+                c.showPage()
+                y = page_h - margin
+                c.setFont('Helvetica-Oblique', 7)
+                c.setFillColor(GREY)
+            c.drawString(x, y, line)
+            y -= 3.4 * mm
+        y -= 8 * mm
+    else:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawString(x, y, 'NA — the delineated reach network did not carry enough distinct Strahler stream orders to derive Horton ratios.')
+        y -= 10 * mm
 
     # ---- Morphology table ----
     if y < 60 * mm:
@@ -1757,6 +2095,81 @@ def _draw_bar_chart(c, x0, y0, w, h, months, values, unit, bar_color, title, gre
     c.drawString(x0, plot_top + 2, f'max {max_val:g} {unit}'.strip())
 
 
+def _draw_line_chart(c, x0, y0, w, h, x_vals, y_vals, x_unit, y_unit, line_color, title, grey, dark, mark_x=None):
+    """A minimal, dependency-free x/y line chart drawn straight onto the
+    reportlab canvas, styled consistently with _draw_bar_chart. Used for the
+    GIUH curve (t in hours vs. u(t) in 1/h). `mark_x`, if given, draws a thin
+    vertical guide (e.g. at the peak time)."""
+    from reportlab.lib import colors as rl_colors
+
+    c.setFillColor(dark)
+    c.setFont('Helvetica-Bold', 10)
+    c.drawString(x0, y0 + h - 8, title)
+
+    n = len(x_vals)
+    if n < 2 or all(v is None for v in y_vals):
+        c.setFillColor(grey)
+        c.setFont('Helvetica', 8)
+        c.drawString(x0, y0 + h / 2, 'No data available')
+        return
+
+    axis_label_h = 10
+    plot_top = y0 + h - 16
+    plot_bottom = y0 + axis_label_h
+    plot_h = max(plot_top - plot_bottom, 1)
+    plot_left = x0 + 2
+    plot_right = x0 + w - 2
+    plot_w = max(plot_right - plot_left, 1)
+
+    x_max = max(x_vals) or 1
+    numeric_y = [v for v in y_vals if v is not None]
+    y_max = max(numeric_y) if numeric_y else 1
+    if y_max <= 0:
+        y_max = 1
+
+    def px(xv):
+        return plot_left + (xv / x_max) * plot_w
+
+    def py(yv):
+        return plot_bottom + (yv / y_max) * plot_h
+
+    c.setStrokeColor(rl_colors.HexColor('#cccccc'))
+    c.setLineWidth(0.6)
+    c.line(plot_left, plot_bottom, plot_right, plot_bottom)
+
+    if mark_x is not None and 0 < mark_x <= x_max:
+        c.setStrokeColor(rl_colors.HexColor('#c9982f'))
+        c.setLineWidth(0.7)
+        c.setDash(2, 2)
+        c.line(px(mark_x), plot_bottom, px(mark_x), plot_top)
+        c.setDash()
+
+    # filled area under the curve, then the stroked line on top
+    path = c.beginPath()
+    path.moveTo(px(x_vals[0]), plot_bottom)
+    for xv, yv in zip(x_vals, y_vals):
+        path.lineTo(px(xv), py(yv if yv is not None else 0))
+    path.lineTo(px(x_vals[-1]), plot_bottom)
+    path.close()
+    fill_color = rl_colors.Color(line_color.red, line_color.green, line_color.blue, alpha=0.15)
+    c.setFillColor(fill_color)
+    c.drawPath(path, fill=1, stroke=0)
+
+    c.setStrokeColor(line_color)
+    c.setLineWidth(1.3)
+    line_path = c.beginPath()
+    line_path.moveTo(px(x_vals[0]), py(y_vals[0] if y_vals[0] is not None else 0))
+    for xv, yv in zip(x_vals[1:], y_vals[1:]):
+        line_path.lineTo(px(xv), py(yv if yv is not None else 0))
+    c.drawPath(line_path, fill=0, stroke=1)
+
+    c.setFillColor(grey)
+    c.setFont('Helvetica', 6.5)
+    c.drawString(plot_left, y0, f'0 {x_unit}')
+    c.drawRightString(plot_right, y0, f'{x_max:g} {x_unit}')
+    c.drawString(plot_left, plot_top + 2, f'max {y_max:g} {y_unit}')
+
+
 # ---------- routes ----------
 
 @app.route('/api/delineate', methods=['POST', 'GET'])
@@ -1870,8 +2283,20 @@ def report():
         wiki_title = geo_info.get('place') or geo_info.get('region')
         wiki_info = wikipedia_summary(wiki_title)
 
+        try:
+            morph = morphology or {}
+            giuh_info = compute_giuh(
+                rivers_geojson, lat, lng,
+                morph.get('area_km2'),
+                morph.get('drainage_density_km_per_km2'),
+                morph.get('main_stream_length_km'),
+                morph.get('time_of_concentration_min'),
+            )
+        except Exception:
+            giuh_info = None
+
         pdf_bytes = build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojson,
-                                      morphology, geo_info, wiki_info, env_info, cn_info)
+                                      morphology, geo_info, wiki_info, env_info, cn_info, giuh_info)
 
         filename = f"manabi_watershed_report_{lat:.4f}_{lng:.4f}.pdf"
         return Response(
