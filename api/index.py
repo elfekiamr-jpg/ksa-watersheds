@@ -7,6 +7,7 @@ import math
 import io
 import datetime
 import concurrent.futures
+import bisect
 from collections import defaultdict, deque
 
 app = Flask(__name__)
@@ -537,13 +538,19 @@ def compute_hypsometry_sample_points(watershed_geojson, target_points=50):
     return candidates
 
 
-def compute_relief_hypsometry_and_profile(watershed_geojson, rivers_geojson, outlet_lat, outlet_lng):
-    """Total relief, hypsometric curve/integral, and main-channel
-    longitudinal profile — fetches every elevation this needs (the
-    hypsometric grid plus the resampled channel path) in a single batched
-    OpenTopoData request. Returns {'hypsometry': {...}, 'profile': {...}},
-    each with 'available': False if it couldn't be computed."""
-    result = {'hypsometry': {'available': False}, 'profile': {'available': False}}
+def compute_relief_hypsometry_and_profile(watershed_geojson, rivers_geojson, outlet_lat, outlet_lng, area_km2=None):
+    """Total relief, hypsometric curve/integral, main-channel longitudinal
+    profile, and (when `area_km2` is supplied) the outlet area-elevation and
+    capacity(storage)-elevation curves — fetches every elevation this needs
+    (the hypsometric grid plus the resampled channel path) in a single
+    batched OpenTopoData request. Returns
+    {'hypsometry': {...}, 'profile': {...}, 'area_capacity': {...}}, each
+    with 'available': False if it couldn't be computed."""
+    result = {
+        'hypsometry': {'available': False},
+        'profile': {'available': False},
+        'area_capacity': {'available': False},
+    }
 
     hyp_coords = compute_hypsometry_sample_points(watershed_geojson)
     channel_path = _trace_main_channel(rivers_geojson, outlet_lat, outlet_lng)
@@ -588,6 +595,42 @@ def compute_relief_hypsometry_and_profile(watershed_geojson, rivers_geojson, out
                 'hypsometric_integral': round(hi, 4),
                 'curve': curve,
             }
+
+            # ---- area-elevation and capacity(storage)-elevation curves at the
+            # outlet, derived from the same hypsometric elevation sample. Treats
+            # the whole upstream watershed as the flood extent at each elevation
+            # (area of the basin with elevation <= z) — a standard DEM/hypsometry-
+            # based estimator when no dedicated reservoir bathymetry/rim survey is
+            # available; see the caveat note drawn alongside it in the report.
+            if area_km2 and area_km2 > 0:
+                sorted_asc = sorted(hyp_elevs)
+                n_pts = len(sorted_asc)
+                n_levels = 21
+                dz = H / (n_levels - 1)
+                levels = [zmin + dz * i for i in range(n_levels)]
+                rows = []
+                cum_vol_m3 = 0.0
+                prev_area_m2 = 0.0
+                for i, z in enumerate(levels):
+                    cnt = bisect.bisect_right(sorted_asc, z)
+                    area_at_z_km2 = (cnt / n_pts) * area_km2
+                    area_at_z_m2 = area_at_z_km2 * 1.0e6
+                    if i > 0:
+                        cum_vol_m3 += (prev_area_m2 + area_at_z_m2) / 2.0 * dz
+                    prev_area_m2 = area_at_z_m2
+                    rows.append({
+                        'elev_m': round(z, 1),
+                        'area_km2': round(area_at_z_km2, 3),
+                        'cum_volume_mcm': round(cum_vol_m3 / 1.0e6, 4),
+                    })
+                result['area_capacity'] = {
+                    'available': True,
+                    'area_km2_total': round(area_km2, 2),
+                    'z_min_m': round(zmin, 1),
+                    'z_max_m': round(zmax, 1),
+                    'total_capacity_mcm': rows[-1]['cum_volume_mcm'] if rows else 0.0,
+                    'rows': rows,
+                }
 
     if prof_samples and any(e is not None for e in prof_elevs):
         points = [{'dist_km': round(d, 3), 'elev_m': round(e, 1)}
@@ -1524,6 +1567,125 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(x, y, line)
         y -= 3.4 * mm
     y -= 6 * mm
+
+    # ---- Area-elevation and capacity-elevation curves at the outlet ----
+    if y < margin + 110 * mm:
+        c.showPage()
+        y = page_h - margin
+    c.setFillColor(DARK)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawString(x, y, 'Area–elevation and capacity (storage)–elevation curves at the outlet')
+    y -= 8 * mm
+
+    ac = relief_info.get('area_capacity') or {'available': False}
+    if ac.get('available'):
+        rows = ac.get('rows') or []
+        stat_w = map_w / 3.0
+        stats = [('Elevation range sampled', f"{ac['z_min_m']:.0f} – {ac['z_max_m']:.0f} m"),
+                 ('Max flooded area (at Zmax)', f"{ac['area_km2_total']:.2f} km2"),
+                 ('Total capacity (Zmin → Zmax)', f"{ac['total_capacity_mcm']:.2f} Mm3")]
+        for i, (label, val) in enumerate(stats):
+            sx = x + i * stat_w
+            c.setFillColor(TEAL_DARK)
+            c.setFont('Helvetica-Bold', 15)
+            c.drawString(sx, y - 6 * mm, val)
+            c.setFillColor(GREY)
+            c.setFont('Helvetica', 7.5)
+            c.drawString(sx, y - 10.5 * mm, label)
+        y -= 15 * mm
+
+        elev_vals = [r['elev_m'] for r in rows]
+        area_vals = [r['area_km2'] for r in rows]
+        vol_vals = [r['cum_volume_mcm'] for r in rows]
+
+        chart_h = 42 * mm
+        chart_w = (map_w - 8 * mm) / 2.0
+        if y - chart_h < margin + 90 * mm:
+            c.showPage()
+            y = page_h - margin
+        _draw_line_chart(c, x, y - chart_h, chart_w, chart_h, area_vals, elev_vals,
+                          'area, km2', 'elev (m)', TEAL_DARK, 'Area–elevation curve', GREY, DARK,
+                          y_from_zero=False)
+        _draw_line_chart(c, x + chart_w + 8 * mm, y - chart_h, chart_w, chart_h, vol_vals, elev_vals,
+                          'capacity, Mm3', 'elev (m)', GOLD, 'Capacity (storage)–elevation curve', GREY, DARK,
+                          y_from_zero=False)
+        y -= (chart_h + 8 * mm)
+
+        # ---- table ----
+        if y < margin + 20 * mm:
+            c.showPage()
+            y = page_h - margin
+        c.setFillColor(DARK)
+        c.setFont('Helvetica-Bold', 10.5)
+        c.drawString(x, y, 'Area–capacity table')
+        y -= 7 * mm
+
+        row_h = 5.6 * mm
+        col2_x = x + 55 * mm
+        col3_x = x + 105 * mm
+        c.setFont('Helvetica-Bold', 8.5)
+        c.setFillColor(GREY)
+        c.drawString(x, y, 'Elevation (m)')
+        c.drawString(col2_x, y, 'Flooded area (km2)')
+        c.drawString(col3_x, y, 'Cumulative capacity (Mm3)')
+        y -= 2.5 * mm
+        c.setStrokeColor(colors.HexColor('#cccccc'))
+        c.line(x, y, page_w - margin, y)
+        y -= 4.5 * mm
+
+        c.setFont('Helvetica', 8.5)
+        for i, r in enumerate(rows):
+            if y < margin + 15 * mm:
+                c.showPage()
+                y = page_h - margin
+                c.setFont('Helvetica-Bold', 8.5)
+                c.setFillColor(GREY)
+                c.drawString(x, y, 'Elevation (m)')
+                c.drawString(col2_x, y, 'Flooded area (km2)')
+                c.drawString(col3_x, y, 'Cumulative capacity (Mm3)')
+                y -= 2.5 * mm
+                c.setStrokeColor(colors.HexColor('#cccccc'))
+                c.line(x, y, page_w - margin, y)
+                y -= 4.5 * mm
+                c.setFont('Helvetica', 8.5)
+            if i % 2 == 0:
+                c.setFillColor(colors.HexColor('#f9f8f5'))
+                c.rect(x, y - 1.3 * mm, page_w - 2 * margin, row_h, fill=1, stroke=0)
+            c.setFillColor(colors.black)
+            c.drawString(x + 1 * mm, y, f"{r['elev_m']:.1f}")
+            c.drawString(col2_x, y, f"{r['area_km2']:.3f}")
+            c.drawString(col3_x, y, f"{r['cum_volume_mcm']:.4f}")
+            y -= row_h
+        y -= 4 * mm
+
+        ac_note = (
+            'Both curves are derived from the same watershed-interior elevation sample used for the hypsometric curve '
+            'above (21 evenly spaced elevation levels between the sampled Zmin and Zmax). At each level z, the flooded '
+            'area is the fraction of sampled points with elevation ≤ z, scaled to the delineated drainage area; the '
+            'cumulative capacity is the trapezoidal integral of that area-elevation relationship from Zmin to z. This '
+            'treats the whole upstream watershed as the potential flood extent at each elevation — a standard '
+            'hypsometry-based estimator when no dedicated reservoir bathymetry or rim survey is available, but it is '
+            'not a substitute for one: a real dam’s pool is bounded by the valley walls up to the dam crest, which is '
+            'normally a much smaller footprint than the full contributing watershed except very close to the outlet. '
+            'Treat these curves as an upper-bound, order-of-magnitude estimate for reconnaissance-level siting, and '
+            'verify against a topographic/bathymetric survey of the actual reservoir rim before any design use.'
+        )
+        c.setFont('Helvetica-Oblique', 7)
+        c.setFillColor(GREY)
+        for line in simpleSplit(ac_note, 'Helvetica-Oblique', 7, map_w):
+            if y < margin + 8 * mm:
+                c.showPage()
+                y = page_h - margin
+                c.setFont('Helvetica-Oblique', 7)
+                c.setFillColor(GREY)
+            c.drawString(x, y, line)
+            y -= 3.4 * mm
+        y -= 6 * mm
+    else:
+        c.setFillColor(GREY)
+        c.setFont('Helvetica', 9)
+        c.drawString(x, y, 'NA — needs both a valid hypsometric elevation sample and a known drainage area to compute.')
+        y -= 10 * mm
 
     # ---- Meteorology & environmental context (best-effort, NA when unavailable) ----
     y -= 6 * mm
@@ -2835,11 +2997,12 @@ def report():
         # Run the geocoding lookup and the environmental-data lookups concurrently —
         # they're independent, unrelated web requests, so there's no reason to
         # wait on one before starting the others.
+        relief_area_km2 = (morphology or {}).get('area_km2')
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
             f_geo = ex.submit(reverse_geocode, lat, lng)
             f_env = ex.submit(fetch_environmental_context, lat, lng)
             f_cn = ex.submit(compute_composite_cn, watershed_geojson)
-            f_relief = ex.submit(compute_relief_hypsometry_and_profile, watershed_geojson, rivers_geojson, lat, lng)
+            f_relief = ex.submit(compute_relief_hypsometry_and_profile, watershed_geojson, rivers_geojson, lat, lng, relief_area_km2)
             try:
                 geo_info = f_geo.result(timeout=15)
             except Exception:
