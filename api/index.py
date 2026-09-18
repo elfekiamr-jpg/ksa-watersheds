@@ -1620,14 +1620,19 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
         c.drawString(x, y, 'Area–capacity table')
         y -= 7 * mm
 
-        row_h = 5.6 * mm
-        col2_x = x + 55 * mm
-        col3_x = x + 105 * mm
+        # NOTE: uses its own local ac_* column/row names rather than the shared
+        # col2_x/row_h used by the Morphology and Meteorology tables above/below —
+        # reusing those names here previously leaked this table's narrower layout
+        # into the Meteorology table that follows, causing its long parameter
+        # labels to overlap the value column.
+        ac_row_h = 5.6 * mm
+        ac_col2_x = x + 55 * mm
+        ac_col3_x = x + 105 * mm
         c.setFont('Helvetica-Bold', 8.5)
         c.setFillColor(GREY)
         c.drawString(x, y, 'Elevation (m)')
-        c.drawString(col2_x, y, 'Flooded area (km2)')
-        c.drawString(col3_x, y, 'Cumulative capacity (Mm3)')
+        c.drawString(ac_col2_x, y, 'Flooded area (km2)')
+        c.drawString(ac_col3_x, y, 'Cumulative capacity (Mm3)')
         y -= 2.5 * mm
         c.setStrokeColor(colors.HexColor('#cccccc'))
         c.line(x, y, page_w - margin, y)
@@ -1641,8 +1646,8 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
                 c.setFont('Helvetica-Bold', 8.5)
                 c.setFillColor(GREY)
                 c.drawString(x, y, 'Elevation (m)')
-                c.drawString(col2_x, y, 'Flooded area (km2)')
-                c.drawString(col3_x, y, 'Cumulative capacity (Mm3)')
+                c.drawString(ac_col2_x, y, 'Flooded area (km2)')
+                c.drawString(ac_col3_x, y, 'Cumulative capacity (Mm3)')
                 y -= 2.5 * mm
                 c.setStrokeColor(colors.HexColor('#cccccc'))
                 c.line(x, y, page_w - margin, y)
@@ -1650,12 +1655,12 @@ def build_pdf_report(lat, lng, watershed_geojson, rivers_geojson, outlets_geojso
                 c.setFont('Helvetica', 8.5)
             if i % 2 == 0:
                 c.setFillColor(colors.HexColor('#f9f8f5'))
-                c.rect(x, y - 1.3 * mm, page_w - 2 * margin, row_h, fill=1, stroke=0)
+                c.rect(x, y - 1.3 * mm, page_w - 2 * margin, ac_row_h, fill=1, stroke=0)
             c.setFillColor(colors.black)
             c.drawString(x + 1 * mm, y, f"{r['elev_m']:.1f}")
-            c.drawString(col2_x, y, f"{r['area_km2']:.3f}")
-            c.drawString(col3_x, y, f"{r['cum_volume_mcm']:.4f}")
-            y -= row_h
+            c.drawString(ac_col2_x, y, f"{r['area_km2']:.3f}")
+            c.drawString(ac_col3_x, y, f"{r['cum_volume_mcm']:.4f}")
+            y -= ac_row_h
         y -= 4 * mm
 
         ac_note = (
